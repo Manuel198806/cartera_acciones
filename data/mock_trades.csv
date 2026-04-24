@@ -1,0 +1,25 @@
+trade_id,strategy_id,ticker,underlying_price,strategy_type,leg_type,action,quantity,strike,expiration,open_date,close_date,premium,commission,realized_pnl,unrealized_pnl,status,notes
+T001,L001,AAPL,187.4,Put vendida,PUT,SELL,1,180,2026-05-15,2026-03-10,2026-04-05,2.45,1.2,123.0,0.0,cerrada,Cierre anticipado al 50%
+T002,L002,MSFT,421.3,Call cubierta,CALL,SELL,1,430,2026-06-19,2026-03-20,,3.15,1.1,0.0,82.0,abierta,Cubierta con 100 acciones
+T003,L003,SPY,509.8,Iron Condor,PUT,SELL,1,495,2026-05-17,2026-04-01,,1.35,0.65,0.0,22.0,abierta,Leg 1 condor
+T004,L003,SPY,509.8,Iron Condor,PUT,BUY,1,490,2026-05-17,2026-04-01,,0.55,0.65,0.0,-8.0,abierta,Leg 2 condor
+T005,L003,SPY,509.8,Iron Condor,CALL,SELL,1,520,2026-05-17,2026-04-01,,1.1,0.65,0.0,18.0,abierta,Leg 3 condor
+T006,L003,SPY,509.8,Iron Condor,CALL,BUY,1,525,2026-05-17,2026-04-01,,0.45,0.65,0.0,-6.0,abierta,Leg 4 condor
+T007,L004,TSLA,171.2,Spread alcista,PUT,SELL,1,165,2026-06-21,2026-02-25,2026-03-30,1.9,1.0,72.0,0.0,cerrada,Spread cerrado por rebote
+T008,L004,TSLA,171.2,Spread alcista,PUT,BUY,1,155,2026-06-21,2026-02-25,2026-03-30,0.6,1.0,-18.0,0.0,cerrada,Protección spread
+T009,L005,NVDA,902.5,Jade Lizard,PUT,SELL,1,860,2026-05-24,2026-03-18,,4.5,1.3,0.0,120.0,abierta,Sin riesgo al alza con call spread
+T010,L005,NVDA,902.5,Jade Lizard,CALL,SELL,1,940,2026-05-24,2026-03-18,,2.1,1.3,0.0,-45.0,abierta,Leg call corta
+T011,L005,NVDA,902.5,Jade Lizard,CALL,BUY,1,955,2026-05-24,2026-03-18,,0.75,1.3,0.0,12.0,abierta,Leg call larga
+T012,L006,AMD,178.9,Roll,PUT,BUY,1,170,2026-04-19,2026-04-10,2026-04-18,-1.4,0.9,-56.0,0.0,rolada,Roll de abril
+T013,L007,AMD,178.9,Roll,PUT,SELL,1,165,2026-05-17,2026-04-18,,2.35,0.9,0.0,34.0,abierta,Nueva pierna tras roll
+T014,L008,QQQ,438.0,Poor Man's Covered Call,CALL,BUY,1,390,2027-01-15,2026-01-12,,52.5,1.8,0.0,640.0,abierta,LEAPS base
+T015,L008,QQQ,438.0,Poor Man's Covered Call,CALL,SELL,1,450,2026-05-17,2026-04-02,,2.25,1.0,0.0,31.0,abierta,Call corta mensual
+T016,L009,IWM,198.6,Synthetic Long,PUT,SELL,1,195,2026-06-19,2026-03-03,,2.2,1.0,0.0,40.0,abierta,Synthetic leg put
+T017,L009,IWM,198.6,Synthetic Long,CALL,BUY,1,195,2026-06-19,2026-03-03,,5.1,1.0,0.0,75.0,abierta,Synthetic leg call
+T018,L010,AAPL,187.4,Asignación,PUT,SELL,1,185,2026-02-21,2026-01-10,2026-02-21,3.4,1.2,210.0,0.0,asignada,Asignado 100 acciones
+T019,L011,AAPL,187.4,Call cubierta,CALL,SELL,1,195,2026-04-19,2026-02-22,2026-04-19,1.95,1.1,84.0,0.0,expirada,Call expirada OTM
+T020,L012,SPY,509.8,Spread bajista,CALL,SELL,1,515,2026-03-20,2026-01-25,2026-03-12,2.0,1.1,95.0,0.0,cerrada,Cierre al 60%
+T021,L012,SPY,509.8,Spread bajista,CALL,BUY,1,525,2026-03-20,2026-01-25,2026-03-12,0.7,1.1,-28.0,0.0,cerrada,Leg larga cerrada
+T022,L013,META,522.0,Put vendida,PUT,SELL,1,500,2026-06-19,2026-04-14,,3.8,1.2,0.0,55.0,abierta,Soporte semanal
+T023,L014,GOOGL,176.2,Cierre parcial,PUT,SELL,2,170,2026-05-17,2026-03-05,2026-04-11,2.3,1.4,140.0,15.0,cerrada,Cerrada 1/2 posición
+T024,L015,AMZN,189.7,Put vendida,PUT,SELL,1,180,2026-06-19,2026-04-15,,2.65,1.1,0.0,28.0,abierta,Delta 0.22
