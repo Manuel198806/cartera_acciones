@@ -117,10 +117,6 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
     df["trade_id"] = raw_trade_id
     df = df[df["trade_id"].str.len() > 0].copy()
 
-    # Filtrado temporal: últimos 12 meses por open_date
-    cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.DateOffset(months=12)
-    df = df[df["open_date"] >= cutoff].copy()
-
     normalized_ib = df[
         [
             "trade_id",

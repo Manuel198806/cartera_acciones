@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
@@ -33,6 +34,10 @@ def _fetch_text(url: str, params: dict[str, str]) -> str:
         return response.read().decode("utf-8", errors="replace")
 
 
+def _looks_like_xml(text: str) -> bool:
+    return text.lstrip().startswith("<?xml") or text.lstrip().startswith("<Flex")
+
+
 def _extract_reference_code(send_request_xml: str) -> str:
     root = ET.fromstring(send_request_xml)
     status = (root.findtext(".//Status") or "").strip().lower()
@@ -48,13 +53,43 @@ def download_latest_ib_csv(token: str, query_id: str, latest_file: Path = LATEST
     """Descarga CSV de IB Flex Query y lo guarda como Consulta_latest.csv."""
     send_request_response = _fetch_text(
         IB_SEND_REQUEST_URL,
-        {"t": token, "q": query_id, "v": "3"},
+        {"t": token, "q": query_id, "v": "3", "f": "csv"},
     )
     reference_code = _extract_reference_code(send_request_response)
-    csv_text = _fetch_text(
-        IB_GET_STATEMENT_URL,
-        {"t": token, "q": reference_code, "v": "3"},
-    )
+    csv_text = ""
+    last_message = ""
+    for _ in range(12):
+        response_text = _fetch_text(
+            IB_GET_STATEMENT_URL,
+            {"t": token, "q": reference_code, "v": "3"},
+        )
+        if not _looks_like_xml(response_text):
+            csv_text = response_text
+            break
+
+        root = ET.fromstring(response_text)
+        status = (root.findtext(".//Status") or "").strip().lower()
+        last_message = (root.findtext(".//ErrorMessage") or root.findtext(".//ErrorCode") or "").strip()
+
+        # Si devuelve una URL con el statement, descargar desde ahí.
+        statement_url = (root.findtext(".//Url") or "").strip()
+        if statement_url:
+            csv_text = _fetch_text(statement_url, {})
+            break
+
+        if status == "success" and root.find(".//FlexStatement") is not None:
+            csv_text = response_text
+            break
+
+        if "generation" in last_message.lower() or "wait" in last_message.lower() or status in {"inprogress", ""}:
+            time.sleep(2)
+            continue
+
+        raise ValueError(last_message or "GetStatement falló al generar el reporte.")
+
+    if not csv_text:
+        raise ValueError(last_message or "IB no devolvió CSV. Reintenta en unos segundos.")
+
     latest_file.parent.mkdir(parents=True, exist_ok=True)
     latest_file.write_text(csv_text, encoding="utf-8")
     return latest_file, reference_code
