@@ -13,7 +13,13 @@ from options_dashboard.charts import (
     chart_premium_by_month,
     chart_win_loss,
 )
-from options_dashboard.data import DataValidationError, grouped_strategies, load_trades
+from options_dashboard.data import (
+    DataValidationError,
+    grouped_strategies,
+    list_data_csv_files,
+    load_trades,
+    resolve_default_data_file,
+)
 from options_dashboard.metrics import build_kpis, cumulative_pnl, monthly_pnl
 
 st.set_page_config(page_title="Dashboard de Opciones", layout="wide")
@@ -166,14 +172,47 @@ def main() -> None:
         ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos"],
     )
 
+    available_files = list_data_csv_files()
+    default_file = resolve_default_data_file()
+    selected_file = str(default_file)
+    if available_files:
+        labels = [p.name for p in available_files]
+        default_idx = labels.index(default_file.name) if default_file.name in labels else 0
+        chosen_label = st.sidebar.selectbox("Archivo CSV", labels, index=default_idx)
+        selected_file = str(next(p for p in available_files if p.name == chosen_label))
+
     try:
-        df = load_trades()
+        df = load_trades(path=selected_file)
     except FileNotFoundError:
-        st.error("No se encontró data/mock_trades.csv. Añade un dataset para continuar.")
+        st.error("No se encontró ningún CSV en la carpeta data.")
         return
     except DataValidationError as err:
         st.error(str(err))
         return
+
+    with st.sidebar.expander("Debug de carga", expanded=False):
+        st.write(f"Archivo: **{df.attrs.get('file_path', selected_file)}**")
+        st.write(f"Fuente detectada: **{df.attrs.get('source', 'desconocida')}**")
+        st.write(f"Filas cargadas: **{df.attrs.get('rows_loaded', len(df))}**")
+        if df.attrs.get("source") == "ib_csv":
+            st.write(f"Filas crudas (raw): **{df.attrs.get('raw_rows_count', 'N/A')}**")
+            st.write(f"Filas filtradas (OPT + TradeID + fecha): **{df.attrs.get('filtered_rows_count', 'N/A')}**")
+            st.write(f"Filas descartadas: **{df.attrs.get('dropped_rows_count', 'N/A')}**")
+        st.write("Columnas detectadas:")
+        st.code(", ".join(df.attrs.get("detected_columns", list(df.columns))))
+        missing_fields = df.attrs.get("missing_fields", [])
+        st.write("Campos faltantes o vacíos:")
+        st.code(", ".join(missing_fields) if missing_fields else "Ninguno")
+        st.write("Primeras 10 filas normalizadas:")
+        st.dataframe(df.head(10), use_container_width=True, hide_index=True)
+        normalized_preview = df.attrs.get("normalized_preview")
+        if normalized_preview is not None and not normalized_preview.empty:
+            st.write("Vista normalizada IB (schema limpio):")
+            st.dataframe(normalized_preview, use_container_width=True, hide_index=True)
+        contract_results = df.attrs.get("contract_results")
+        if contract_results is not None and not contract_results.empty:
+            st.write("Resultado por contrato (contract_key / net_quantity / net_cash_total / position_status):")
+            st.dataframe(contract_results, use_container_width=True, hide_index=True)
 
     if section == "Dashboard":
         dashboard_view(df)

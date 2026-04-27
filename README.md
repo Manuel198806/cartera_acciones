@@ -55,7 +55,21 @@ El repositorio original estaba en Python sin framework web definido. Se implemen
 - Tema claro/oscuro y navegación por sidebar.
 - Manejo básico de errores por dataset ausente o columnas incompletas.
 
-## Dataset mock
+## Dataset
+La app detecta automáticamente los CSV en `data/`:
+
+- Si existe `Consulta.csv`, lo usa por defecto.
+- Si no existe, usa `mock_trades.csv`.
+- En la barra lateral puedes seleccionar otro CSV disponible desde un desplegable.
+
+Para IB se incluye una capa de normalización automática:
+
+- Sin preprocesado manual en Excel.
+- Conversión de tipos y columnas al esquema interno.
+- Filtro automático a últimos 12 meses por `open_date`.
+- Vinculación de aperturas/cierres por contrato (`strategy_id` por ciclo).
+
+### Mock de respaldo
 Se incluye `data/mock_trades.csv` con estructura preparada para:
 
 - Operaciones individuales (`trade_id`).

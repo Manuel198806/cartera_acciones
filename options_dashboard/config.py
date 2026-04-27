@@ -2,6 +2,7 @@
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
 DATA_FILE = BASE_DIR / "data" / "mock_trades.csv"
 DATE_COLUMNS = ["open_date", "close_date", "expiration"]
 REQUIRED_COLUMNS = {
