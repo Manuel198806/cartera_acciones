@@ -38,7 +38,19 @@ def resolve_default_data_file() -> Path:
 
 
 def _parse_ib_date(series: pd.Series) -> pd.Series:
-    return pd.to_datetime(series.astype(str).str.strip(), format="%Y%m%d", errors="coerce")
+    raw = series.astype(str).str.strip()
+    parsed = pd.to_datetime(raw, format="%Y%m%d", errors="coerce")
+    missing = parsed.isna()
+    if missing.any():
+        parsed_alt = pd.to_datetime(raw[missing], format="%d-%m-%y", errors="coerce")
+        parsed.loc[missing] = parsed_alt
+    return parsed
+
+
+def _extract_strike_from_symbol(symbol: pd.Series) -> pd.Series:
+    extracted = symbol.fillna("").astype(str).str.extract(r"([CP])(\d{8})$", expand=True)
+    strike_digits = pd.to_numeric(extracted[1], errors="coerce")
+    return strike_digits / 1000.0
 
 
 def _clean_str(df: pd.DataFrame) -> pd.DataFrame:
@@ -68,6 +80,7 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
     qty = pd.to_numeric(df.get("Quantity"), errors="coerce").fillna(0)
     multiplier = pd.to_numeric(df.get("Multiplier"), errors="coerce").fillna(100)
     strike = pd.to_numeric(df.get("Strike"), errors="coerce")
+    strike_from_symbol = _extract_strike_from_symbol(df.get("Symbol", pd.Series(index=df.index, dtype="object")))
     trade_price = pd.to_numeric(df.get("TradePrice"), errors="coerce").fillna(0.0)
     trade_money = pd.to_numeric(df.get("TradeMoney"), errors="coerce").fillna(0.0)
     net_cash = pd.to_numeric(df.get("NetCash"), errors="coerce").fillna(0.0)
@@ -75,7 +88,7 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
 
     df["quantity"] = qty.abs()
     df["signed_quantity"] = qty
-    df["strike"] = strike.fillna(0.0)
+    df["strike"] = strike.where(strike.notna(), strike_from_symbol).fillna(0.0)
     df["underlying_price"] = close_price.fillna(0.0)
     df["premium"] = trade_price.abs()
     df["commission"] = (trade_money.abs() - net_cash.abs()).abs().fillna(0.0)
