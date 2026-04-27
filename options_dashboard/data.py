@@ -44,13 +44,17 @@ def _parse_ib_date(series: pd.Series) -> pd.Series:
     if missing.any():
         parsed_alt = pd.to_datetime(raw[missing], format="%d-%m-%y", errors="coerce")
         parsed.loc[missing] = parsed_alt
+    missing = parsed.isna()
+    if missing.any():
+        parsed_alt = pd.to_datetime(raw[missing], format="%d/%m/%Y", errors="coerce")
+        parsed.loc[missing] = parsed_alt
     return parsed
 
 
-def _extract_strike_from_symbol(symbol: pd.Series) -> pd.Series:
-    extracted = symbol.fillna("").astype(str).str.extract(r"([CP])(\d{8})$", expand=True)
-    strike_digits = pd.to_numeric(extracted[1], errors="coerce")
-    return strike_digits / 1000.0
+def _extract_strike_from_description(description: pd.Series) -> pd.Series:
+    text = description.fillna("").astype(str).str.upper()
+    extracted = text.str.extract(r"\s(-?\d+(?:\.\d+)?)\s[CP]\s*$", expand=False)
+    return pd.to_numeric(extracted, errors="coerce")
 
 
 def _clean_str(df: pd.DataFrame) -> pd.DataFrame:
@@ -63,46 +67,44 @@ def _clean_str(df: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
     """Convierte export de IB a esquema interno del dashboard."""
+    raw_rows_count = int(len(df_raw))
     df = df_raw.copy()
     df.columns = [str(c).strip() for c in df.columns]
     df = _clean_str(df)
 
-    # Mantener solo filas operables
+    # Mantener solo opciones con TradeID válido
+    for col in ["TradeID", "Open/CloseIndicator", "OrigTradeID", "AssetClass", "Description"]:
+        if col not in df.columns:
+            df[col] = pd.NA
+    df = df[df["AssetClass"].fillna("").str.upper() == "OPT"].copy()
+    trade_id_raw = df["TradeID"].fillna("").astype(str).str.strip()
+    df = df[trade_id_raw.ne("")].copy()
     df = df[df["TradeDate"].notna()].copy()
+
     for col in ["TradeID", "Open/CloseIndicator", "OrigTradeID"]:
         if col not in df.columns:
             df[col] = pd.NA
 
     df["open_date"] = _parse_ib_date(df["TradeDate"])
     df["expiration"] = _parse_ib_date(df["Expiry"])
-    df["close_date"] = pd.NaT
 
-    qty = pd.to_numeric(df.get("Quantity"), errors="coerce").fillna(0)
-    multiplier = pd.to_numeric(df.get("Multiplier"), errors="coerce").fillna(100)
-    strike = pd.to_numeric(df.get("Strike"), errors="coerce")
-    strike_from_symbol = _extract_strike_from_symbol(df.get("Symbol", pd.Series(index=df.index, dtype="object")))
-    trade_price = pd.to_numeric(df.get("TradePrice"), errors="coerce").fillna(0.0)
-    trade_money = pd.to_numeric(df.get("TradeMoney"), errors="coerce").fillna(0.0)
+    qty = pd.to_numeric(df.get("Quantity"), errors="coerce").fillna(0.0)
+    multiplier = pd.to_numeric(df.get("Multiplier"), errors="coerce").fillna(100.0)
+    strike = _extract_strike_from_description(df.get("Description", pd.Series(index=df.index, dtype="object")))
     net_cash = pd.to_numeric(df.get("NetCash"), errors="coerce").fillna(0.0)
-    close_price = pd.to_numeric(df.get("ClosePrice"), errors="coerce")
+    leg_type_mapped = df["Put/Call"].fillna("").str.upper().map({"C": "CALL", "P": "PUT"}).fillna("UNKNOWN")
+    open_close = df["Open/CloseIndicator"].fillna("").str.upper().map({"O": "OPENING", "C": "CLOSING"}).fillna("UNKNOWN")
 
-    df["quantity"] = qty.abs()
-    df["signed_quantity"] = qty
-    df["strike"] = strike.where(strike.notna(), strike_from_symbol).fillna(0.0)
-    df["underlying_price"] = close_price.fillna(0.0)
-    df["premium"] = trade_price.abs()
-    df["commission"] = (trade_money.abs() - net_cash.abs()).abs().fillna(0.0)
-    df["unrealized_pnl"] = 0.0
+    df["quantity"] = qty
+    df["quantity_abs"] = qty.abs()
+    df["strike"] = strike
+    df["net_cash"] = net_cash
     df["action"] = df["Buy/Sell"].fillna("UNKNOWN").str.upper()
-    df["leg_type"] = df["Put/Call"].fillna("UNK").str.upper()
+    df["leg_type"] = leg_type_mapped
+    df["open_close_indicator"] = open_close
     df["ticker"] = df.get("UnderlyingSymbol", pd.Series(index=df.index, dtype="object")).fillna("UNKNOWN")
-    df["strategy_type"] = "Opción simple (IB)"
-    df["notes"] = (
-        "IB "
-        + df.get("OrderType", pd.Series(index=df.index, dtype="object")).fillna("NA")
-        + " · "
-        + df.get("Description", pd.Series(index=df.index, dtype="object")).fillna("")
-    )
+    df["description"] = df.get("Description", pd.Series(index=df.index, dtype="object")).fillna("")
+    df["asset"] = "OPTION"
 
     # TradeID puede venir vacío o en notación científica
     raw_trade_id = df["TradeID"].fillna("").astype(str)
@@ -110,54 +112,87 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
     raw_trade_id = raw_trade_id.apply(
         lambda x: re.sub(r"\D", "", f"{float(x):.0f}") if x and "e" in x.lower() else re.sub(r"\D", "", x)
     )
-    fallback_id = pd.Series([f"IB-{i+1:06d}" for i in range(len(df))], index=df.index)
-    df["trade_id"] = raw_trade_id.where(raw_trade_id.str.len() > 0, fallback_id)
+    df["trade_id"] = raw_trade_id
+    df = df[df["trade_id"].str.len() > 0].copy()
 
-    contract_key = (
-        df["ticker"].astype(str)
-        + "-"
-        + df["expiration"].dt.strftime("%Y%m%d").fillna("NA")
-        + "-"
-        + df["strike"].round(4).astype(str)
-        + "-"
-        + df["leg_type"].astype(str)
+    # Filtrado temporal: últimos 12 meses por open_date
+    cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.DateOffset(months=12)
+    df = df[df["open_date"] >= cutoff].copy()
+
+    normalized_ib = df[
+        [
+            "trade_id",
+            "OrigTradeID",
+            "ticker",
+            "description",
+            "asset",
+            "leg_type",
+            "action",
+            "open_close_indicator",
+            "open_date",
+            "expiration",
+            "strike",
+            "quantity",
+            "quantity_abs",
+            "Multiplier",
+            "net_cash",
+        ]
+    ].rename(columns={"OrigTradeID": "orig_trade_id", "Multiplier": "multiplier"})
+
+    normalized_ib["contract_key"] = (
+        normalized_ib["ticker"].astype(str)
+        + "|"
+        + normalized_ib["leg_type"].astype(str)
+        + "|"
+        + normalized_ib["strike"].round(4).astype(str)
+        + "|"
+        + normalized_ib["expiration"].dt.strftime("%Y-%m-%d").fillna("NA")
     )
-
-    df["realized_pnl"] = net_cash
 
     contract_results = (
-        df.assign(net_cash=net_cash)
-        .groupby(["ticker", "leg_type", "strike", "expiration"], dropna=False, as_index=False)
+        normalized_ib.groupby("contract_key", dropna=False, as_index=False)
         .agg(
-            net_quantity=("signed_quantity", "sum"),
+            ticker=("ticker", "first"),
+            leg_type=("leg_type", "first"),
+            strike=("strike", "first"),
+            expiration=("expiration", "first"),
+            net_quantity=("quantity", "sum"),
             net_cash_total=("net_cash", "sum"),
-            open_date=("open_date", "min"),
-            close_date=("open_date", "max"),
         )
     )
-    contract_results["status"] = contract_results["net_quantity"].apply(
-        lambda x: "cerrada" if abs(x) < 1e-9 else "abierta"
+    contract_results["position_status"] = contract_results["net_quantity"].apply(
+        lambda x: "CLOSED" if abs(x) < 1e-9 else "OPEN"
     )
-    contract_results.loc[contract_results["status"] == "abierta", "close_date"] = pd.NaT
-    contract_results["strategy_id"] = (
-        "IB-"
-        + contract_results["ticker"].astype(str)
-        + "-"
-        + contract_results["expiration"].dt.strftime("%Y%m%d").fillna("NA")
-        + "-"
-        + contract_results["open_date"].dt.strftime("%Y%m%d").fillna("NA")
+    contract_results["realized_pnl"] = contract_results["net_cash_total"].where(
+        contract_results["position_status"] == "CLOSED", 0.0
+    )
+    contract_results["pending_cash"] = contract_results["net_cash_total"].where(
+        contract_results["position_status"] == "OPEN", 0.0
     )
 
-    df = df.drop(columns=["close_date"], errors="ignore")
-    df = df.merge(
-        contract_results[
-            ["ticker", "leg_type", "strike", "expiration", "strategy_id", "status", "close_date"]
-        ],
-        on=["ticker", "leg_type", "strike", "expiration"],
+    # Mapeo al esquema actual del dashboard (sin romper vistas existentes)
+    normalized = normalized_ib.copy()
+    normalized["strategy_id"] = normalized["contract_key"]
+    normalized["underlying_price"] = 0.0
+    normalized["strategy_type"] = "Contrato opción (IB)"
+    normalized["close_date"] = pd.NaT
+    normalized["premium"] = normalized["net_cash"].abs()
+    normalized["commission"] = 0.0
+    normalized["realized_pnl"] = normalized["net_cash"]
+    normalized["unrealized_pnl"] = 0.0
+    normalized["status"] = "abierta"
+    normalized["notes"] = normalized["description"]
+    normalized["quantity"] = normalized["quantity_abs"]
+    normalized = normalized.merge(
+        contract_results[["contract_key", "position_status", "realized_pnl", "pending_cash"]],
+        on="contract_key",
         how="left",
+        suffixes=("", "_contract"),
     )
+    normalized.loc[normalized["position_status"] == "CLOSED", "status"] = "cerrada"
+    normalized.loc[normalized["position_status"] == "OPEN", "status"] = "abierta"
 
-    normalized = df[
+    normalized = normalized[
         [
             "trade_id",
             "strategy_id",
@@ -178,19 +213,15 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
             "status",
             "notes",
         ]
-    ].copy()
+    ].copy().reset_index(drop=True)
 
-    cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.DateOffset(months=12)
-    normalized = normalized[normalized["open_date"] >= cutoff].copy()
-    contract_results = contract_results[contract_results["open_date"] >= cutoff].copy()
-    strategy_results = (
-        contract_results.groupby(["strategy_id", "ticker"], dropna=False, as_index=False)
-        .agg(total_pnl=("net_cash_total", "sum"))
-    )
     normalized.attrs["source"] = "ib_csv"
+    normalized.attrs["raw_rows_count"] = raw_rows_count
+    normalized.attrs["filtered_rows_count"] = int(len(normalized_ib))
+    normalized.attrs["dropped_rows_count"] = int(raw_rows_count - len(normalized_ib))
+    normalized.attrs["normalized_preview"] = normalized_ib.head(10).copy()
     normalized.attrs["contract_results"] = contract_results
-    normalized.attrs["strategy_results"] = strategy_results
-    return normalized.reset_index(drop=True)
+    return normalized
 
 
 @st.cache_data(show_spinner=False)

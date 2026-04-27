@@ -194,6 +194,10 @@ def main() -> None:
         st.write(f"Archivo: **{df.attrs.get('file_path', selected_file)}**")
         st.write(f"Fuente detectada: **{df.attrs.get('source', 'desconocida')}**")
         st.write(f"Filas cargadas: **{df.attrs.get('rows_loaded', len(df))}**")
+        if df.attrs.get("source") == "ib_csv":
+            st.write(f"Filas crudas (raw): **{df.attrs.get('raw_rows_count', 'N/A')}**")
+            st.write(f"Filas filtradas (OPT + TradeID + fecha): **{df.attrs.get('filtered_rows_count', 'N/A')}**")
+            st.write(f"Filas descartadas: **{df.attrs.get('dropped_rows_count', 'N/A')}**")
         st.write("Columnas detectadas:")
         st.code(", ".join(df.attrs.get("detected_columns", list(df.columns))))
         missing_fields = df.attrs.get("missing_fields", [])
@@ -201,14 +205,14 @@ def main() -> None:
         st.code(", ".join(missing_fields) if missing_fields else "Ninguno")
         st.write("Primeras 10 filas normalizadas:")
         st.dataframe(df.head(10), use_container_width=True, hide_index=True)
+        normalized_preview = df.attrs.get("normalized_preview")
+        if normalized_preview is not None and not normalized_preview.empty:
+            st.write("Vista normalizada IB (schema limpio):")
+            st.dataframe(normalized_preview, use_container_width=True, hide_index=True)
         contract_results = df.attrs.get("contract_results")
         if contract_results is not None and not contract_results.empty:
-            st.write("Resultado por contrato (net_quantity / net_cash_total):")
+            st.write("Resultado por contrato (contract_key / net_quantity / net_cash_total / position_status):")
             st.dataframe(contract_results, use_container_width=True, hide_index=True)
-        strategy_results = df.attrs.get("strategy_results")
-        if strategy_results is not None and not strategy_results.empty:
-            st.write("Resultado total por strategy_id:")
-            st.dataframe(strategy_results, use_container_width=True, hide_index=True)
 
     if section == "Dashboard":
         dashboard_view(df)
