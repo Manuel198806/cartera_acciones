@@ -201,6 +201,14 @@ def main() -> None:
         st.code(", ".join(missing_fields) if missing_fields else "Ninguno")
         st.write("Primeras 10 filas normalizadas:")
         st.dataframe(df.head(10), use_container_width=True, hide_index=True)
+        contract_results = df.attrs.get("contract_results")
+        if contract_results is not None and not contract_results.empty:
+            st.write("Resultado por contrato (net_quantity / net_cash_total):")
+            st.dataframe(contract_results, use_container_width=True, hide_index=True)
+        strategy_results = df.attrs.get("strategy_results")
+        if strategy_results is not None and not strategy_results.empty:
+            st.write("Resultado total por strategy_id:")
+            st.dataframe(strategy_results, use_container_width=True, hide_index=True)
 
     if section == "Dashboard":
         dashboard_view(df)

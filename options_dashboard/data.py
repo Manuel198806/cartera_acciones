@@ -74,6 +74,7 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
     close_price = pd.to_numeric(df.get("ClosePrice"), errors="coerce")
 
     df["quantity"] = qty.abs()
+    df["signed_quantity"] = qty
     df["strike"] = strike.fillna(0.0)
     df["underlying_price"] = close_price.fillna(0.0)
     df["premium"] = trade_price.abs()
@@ -109,23 +110,39 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
         + df["leg_type"].astype(str)
     )
 
-    indicator = df["Open/CloseIndicator"].fillna("").str.upper()
-    inferred_close = (
-        ((df["action"] == "BUY") & (qty < 0))
-        | ((df["action"] == "SELL") & (qty > 0))
+    df["realized_pnl"] = net_cash
+
+    contract_results = (
+        df.assign(net_cash=net_cash)
+        .groupby(["ticker", "leg_type", "strike", "expiration"], dropna=False, as_index=False)
+        .agg(
+            net_quantity=("signed_quantity", "sum"),
+            net_cash_total=("net_cash", "sum"),
+            open_date=("open_date", "min"),
+            close_date=("open_date", "max"),
+        )
     )
-    close_mask = (indicator == "C") | inferred_close
-    open_mask = (indicator == "O") | ~close_mask
+    contract_results["status"] = contract_results["net_quantity"].apply(
+        lambda x: "cerrada" if abs(x) < 1e-9 else "abierta"
+    )
+    contract_results.loc[contract_results["status"] == "abierta", "close_date"] = pd.NaT
+    contract_results["strategy_id"] = (
+        "IB-"
+        + contract_results["ticker"].astype(str)
+        + "-"
+        + contract_results["expiration"].dt.strftime("%Y%m%d").fillna("NA")
+        + "-"
+        + contract_results["open_date"].dt.strftime("%Y%m%d").fillna("NA")
+    )
 
-    df.loc[close_mask, "close_date"] = df.loc[close_mask, "open_date"]
-    df["status"] = "abierta"
-    df.loc[close_mask, "status"] = "cerrada"
-    df["realized_pnl"] = 0.0
-    df.loc[close_mask, "realized_pnl"] = net_cash.loc[close_mask]
-
-    # Vincular cierres con aperturas por ciclo en cada contrato
-    cycle = open_mask.groupby(contract_key).cumsum()
-    df["strategy_id"] = "IB-" + contract_key + "-C" + cycle.astype(int).astype(str)
+    df = df.drop(columns=["close_date"], errors="ignore")
+    df = df.merge(
+        contract_results[
+            ["ticker", "leg_type", "strike", "expiration", "strategy_id", "status", "close_date"]
+        ],
+        on=["ticker", "leg_type", "strike", "expiration"],
+        how="left",
+    )
 
     normalized = df[
         [
@@ -152,7 +169,14 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
 
     cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.DateOffset(months=12)
     normalized = normalized[normalized["open_date"] >= cutoff].copy()
+    contract_results = contract_results[contract_results["open_date"] >= cutoff].copy()
+    strategy_results = (
+        contract_results.groupby(["strategy_id", "ticker"], dropna=False, as_index=False)
+        .agg(total_pnl=("net_cash_total", "sum"))
+    )
     normalized.attrs["source"] = "ib_csv"
+    normalized.attrs["contract_results"] = contract_results
+    normalized.attrs["strategy_results"] = strategy_results
     return normalized.reset_index(drop=True)
 
 
