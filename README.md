@@ -52,6 +52,10 @@ El repositorio original estaba en Python sin framework web definido. Se implemen
 - Vista de vencimientos:
   - Agrupación por fecha de expiración.
   - Ticker, estrategia, strikes, prima pendiente, riesgo estimado y días restantes.
+- Vista **IB Download**:
+  - Descarga reportes Flex de Interactive Brokers usando `token` y `query_id`.
+  - Normalización automática a columnas del dashboard (`trade_id`, `strategy_id`, `ticker`, etc.).
+  - Guardado en `data/mock_trades.csv` o `data/ib_normalized_trades.csv`.
 - Tema claro/oscuro y navegación por sidebar.
 - Manejo básico de errores por dataset ausente o columnas incompletas.
 
@@ -108,7 +112,7 @@ streamlit run app.py
 
 ## Próximos pasos sugeridos
 
-- Conectar capa de datos a exportaciones reales (Interactive Brokers / FlexQuery).
+- Añadir validaciones más finas para casos edge del CSV/XML de IB Flex.
 - Añadir autenticación y persistencia.
 - Separar vistas en páginas nativas de Streamlit para crecimiento modular.
 - Incorporar testing unitario de métricas y validaciones de esquemas.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from options_dashboard.config import DATA_FILE, IB_NORMALIZED_FILE
 from options_dashboard.charts import (
     chart_cumulative_pnl,
     chart_expiration_calendar,
@@ -13,13 +14,12 @@ from options_dashboard.charts import (
     chart_premium_by_month,
     chart_win_loss,
 )
-from options_dashboard.data import DataValidationError, grouped_strategies, load_trades
-from options_dashboard.config import SUPPORTED_STRATEGY_TYPES
 from options_dashboard.data import (
-    apply_manual_strategy_tags,
-    build_contract_groups,
-    load_strategy_tags,
-    upsert_strategy_tags,
+    DataValidationError,
+    download_ib_flex_csv,
+    grouped_strategies,
+    load_trades,
+    normalize_ib_trades,
 )
 from options_dashboard.metrics import build_kpis, cumulative_pnl, monthly_pnl
 
@@ -115,118 +115,6 @@ def operations_table_view(df: pd.DataFrame) -> None:
             st.dataframe(legs, use_container_width=True, hide_index=True)
 
 
-def strategy_builder_view(df: pd.DataFrame, tags: pd.DataFrame) -> None:
-    st.header("Strategy Builder")
-    groups = build_contract_groups(df)
-    display_df = groups.copy()
-
-    c1, c2, c3 = st.columns(3)
-    ticker_filter = c1.multiselect("ticker", sorted(display_df["ticker"].dropna().unique()))
-    expiration_filter = c2.multiselect(
-        "expiration",
-        sorted(display_df["expiration"].dropna().dt.date.unique()),
-    )
-    open_date_filter = c3.multiselect(
-        "open_date",
-        sorted(display_df["open_date"].dropna().dt.date.unique()),
-    )
-
-    c4, c5 = st.columns(2)
-    status_choices = sorted(df["status"].dropna().astype(str).unique())
-    leg_type_choices = sorted(df["leg_type"].dropna().astype(str).unique())
-    status_filter = c4.multiselect("status", status_choices)
-    leg_type_filter = c5.multiselect("leg_type", leg_type_choices)
-
-    filtered = display_df.copy()
-    if ticker_filter:
-        filtered = filtered[filtered["ticker"].isin(ticker_filter)]
-    if expiration_filter:
-        filtered = filtered[filtered["expiration"].dt.date.isin(expiration_filter)]
-    if open_date_filter:
-        filtered = filtered[filtered["open_date"].dt.date.isin(open_date_filter)]
-    if status_filter:
-        filtered = filtered[
-            filtered["status"].fillna("").apply(
-                lambda value: any(item in value.split(", ") for item in status_filter)
-            )
-        ]
-    if leg_type_filter:
-        filtered = filtered[
-            filtered["leg_type"].fillna("").apply(
-                lambda value: any(item in value.split(", ") for item in leg_type_filter)
-            )
-        ]
-
-    st.dataframe(filtered, use_container_width=True, hide_index=True)
-    options = filtered["contract_key"].tolist()
-    selected_contract_keys = st.multiselect(
-        "Selecciona contract groups para agrupar",
-        options=options,
-    )
-
-    with st.form("strategy_builder_form"):
-        strategy_id = st.text_input("strategy_id")
-        strategy_type = st.selectbox("strategy_type", SUPPORTED_STRATEGY_TYPES)
-        notes = st.text_area("notes")
-        submitted = st.form_submit_button("Guardar strategy tags")
-
-    if submitted:
-        if not selected_contract_keys:
-            st.warning("Selecciona al menos un contract_key.")
-        elif not strategy_id.strip():
-            st.warning("strategy_id es obligatorio.")
-        else:
-            upsert_strategy_tags(
-                contract_keys=selected_contract_keys,
-                strategy_id=strategy_id.strip(),
-                strategy_type=strategy_type,
-                notes=notes.strip(),
-            )
-            st.success("Strategy tags guardados en data/strategy_tags.csv.")
-            st.cache_data.clear()
-            st.rerun()
-
-    st.subheader("Etiquetas manuales actuales")
-    st.dataframe(tags, use_container_width=True, hide_index=True)
-
-
-def strategies_view(df: pd.DataFrame) -> None:
-    st.header("Strategies")
-    enriched = df.copy()
-    enriched["pending_premium"] = enriched.apply(
-        lambda row: row["premium"] if str(row["status"]).lower() == "abierta" else 0.0,
-        axis=1,
-    )
-    grouped = (
-        enriched.groupby(["strategy_id", "strategy_type"], dropna=False, as_index=False)
-        .agg(
-            ticker=("ticker", lambda x: ", ".join(sorted(x.dropna().astype(str).unique()))),
-            open_date=("open_date", "min"),
-            close_date=("close_date", "max"),
-            status=("status", lambda x: ", ".join(sorted(x.dropna().astype(str).unique()))),
-            contracts=("trade_id", "count"),
-            realized_pnl=("realized_pnl", "sum"),
-            pending_premium=("pending_premium", "sum"),
-            notes=("notes", lambda x: " | ".join(x.dropna().astype(str).unique())),
-        )
-        .sort_values("open_date", ascending=False)
-    )
-    grouped["total_realized_pnl"] = grouped["realized_pnl"]
-    cols = [
-        "strategy_id",
-        "strategy_type",
-        "ticker",
-        "open_date",
-        "close_date",
-        "status",
-        "contracts",
-        "total_realized_pnl",
-        "pending_premium",
-        "notes",
-    ]
-    st.dataframe(grouped[cols], use_container_width=True, hide_index=True)
-
-
 def ticker_view(df: pd.DataFrame) -> None:
     st.header("Vista por ticker")
     ticker = st.selectbox("Selecciona ticker", sorted(df["ticker"].unique()))
@@ -275,6 +163,33 @@ def expirations_view(df: pd.DataFrame) -> None:
     st.plotly_chart(chart_expiration_calendar(df), use_container_width=True)
 
 
+def ib_download_view() -> None:
+    st.header("IB Download")
+    st.caption("Descarga un reporte Flex desde Interactive Brokers y normalízalo al esquema del dashboard.")
+
+    col1, col2 = st.columns(2)
+    token = col1.text_input("Flex token", type="password")
+    query_id = col2.text_input("Flex query_id")
+
+    output_target = st.radio(
+        "Destino del CSV normalizado",
+        ["Reemplazar dataset principal", "Guardar como dataset IB separado"],
+        horizontal=True,
+    )
+    output_path = DATA_FILE if output_target == "Reemplazar dataset principal" else IB_NORMALIZED_FILE
+
+    if st.button("Descargar y normalizar desde IB"):
+        try:
+            raw_ib = download_ib_flex_csv(token=token.strip(), query_id=query_id.strip())
+            normalized = normalize_ib_trades(raw_ib)
+            normalized.to_csv(output_path, index=False)
+            st.success(f"Importación completada. {len(normalized)} filas guardadas en {output_path}.")
+            st.dataframe(normalized.head(50), use_container_width=True, hide_index=True)
+            st.cache_data.clear()
+        except Exception as err:
+            st.error(f"Error importando desde IB: {err}")
+
+
 def main() -> None:
     st.sidebar.title("Seguimiento de opciones")
     mode = st.sidebar.radio("Tema", ["Claro", "Oscuro"])
@@ -282,13 +197,11 @@ def main() -> None:
 
     section = st.sidebar.radio(
         "Navegación",
-        ["Dashboard", "Operaciones", "Strategies", "Strategy Builder", "Vista por ticker", "Vencimientos"],
+        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "IB Download"],
     )
 
     try:
         df = load_trades()
-        tags = load_strategy_tags()
-        df = apply_manual_strategy_tags(df, tags)
     except FileNotFoundError:
         st.error("No se encontró data/mock_trades.csv. Añade un dataset para continuar.")
         return
@@ -300,12 +213,10 @@ def main() -> None:
         dashboard_view(df)
     elif section == "Operaciones":
         operations_table_view(df)
-    elif section == "Strategies":
-        strategies_view(df)
-    elif section == "Strategy Builder":
-        strategy_builder_view(df, tags)
     elif section == "Vista por ticker":
         ticker_view(df)
+    elif section == "IB Download":
+        ib_download_view()
     else:
         expirations_view(df)
 
