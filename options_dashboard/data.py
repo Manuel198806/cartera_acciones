@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from options_dashboard.config import DATA_DIR, DATA_FILE, DATE_COLUMNS, REQUIRED_COLUMNS
+from options_dashboard.config import DATA_DIR, DATA_FILE, DATE_COLUMNS, MASTER_DATA_FILE, REQUIRED_COLUMNS
 
 
 class DataValidationError(Exception):
@@ -25,9 +25,11 @@ def list_data_csv_files() -> list[Path]:
 
 
 def resolve_default_data_file() -> Path:
-    """Prioriza Consulta.csv; si no existe, usa mock_trades.csv."""
+    """Prioridad: Consulta_master.csv -> Consulta.csv -> mock_trades.csv."""
     files = list_data_csv_files()
     by_name = {p.name.lower(): p for p in files}
+    if MASTER_DATA_FILE.exists():
+        return MASTER_DATA_FILE
     if "consulta.csv" in by_name:
         return by_name["consulta.csv"]
     if DATA_FILE.exists():
@@ -114,10 +116,6 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
     )
     df["trade_id"] = raw_trade_id
     df = df[df["trade_id"].str.len() > 0].copy()
-
-    # Filtrado temporal: últimos 12 meses por open_date
-    cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.DateOffset(months=12)
-    df = df[df["open_date"] >= cutoff].copy()
 
     normalized_ib = df[
         [
