@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from options_dashboard.charts import (
@@ -20,7 +21,13 @@ from options_dashboard.data import (
     load_trades,
     resolve_default_data_file,
 )
-from options_dashboard.ib_flex import download_latest_ib_csv, load_import_summary, merge_latest_into_master
+from options_dashboard.ib_flex import (
+    REQUIRED_IB_COLUMNS,
+    download_latest_ib_csv,
+    load_import_summary,
+    merge_latest_into_master,
+    merge_uploaded_csv_into_master,
+)
 from options_dashboard.metrics import build_kpis, cumulative_pnl, monthly_pnl
 
 st.set_page_config(page_title="Dashboard de Opciones", layout="wide")
@@ -49,7 +56,7 @@ def render_kpis(kpis: dict[str, float]) -> None:
     row1[0].metric("P&L Total", format_currency(kpis["pnl_total"]))
     row1[1].metric("P&L Mensual", format_currency(kpis["pnl_mensual"]))
     row1[2].metric("P&L Anual", format_currency(kpis["pnl_anual"]))
-    row1[3].metric("Prima total", format_currency(kpis["prima_total"]))
+    row1[3].metric("Prima ganada", format_currency(kpis["prima_total"]))
     row1[4].metric("Prima cerrada", format_currency(kpis["prima_cerrada"]))
     row1[5].metric("Prima pendiente", format_currency(kpis["prima_pendiente"]))
 
@@ -63,6 +70,7 @@ def render_kpis(kpis: dict[str, float]) -> None:
 def dashboard_view(df: pd.DataFrame) -> None:
     st.header("Dashboard principal")
     render_kpis(build_kpis(df))
+    st.caption("Open option premium is shown as pending until the position is closed.")
 
     monthly = monthly_pnl(df)
     cumulative = cumulative_pnl(df)
@@ -205,6 +213,188 @@ def import_summary_view() -> None:
         st.success("Sin warnings en la última importación.")
 
 
+def upload_csv_to_master_view() -> None:
+    st.header("Upload CSV to Master")
+    st.write("Sube un archivo CSV de Interactive Brokers para fusionarlo con `Consulta_master.csv`.")
+    uploaded_file = st.file_uploader("Selecciona CSV de IB", type=["csv"])
+
+    if not uploaded_file:
+        return
+
+    try:
+        uploaded_df = pd.read_csv(uploaded_file, dtype=str)
+    except Exception as exc:
+        st.error(f"No se pudo leer el CSV subido: {exc}")
+        return
+
+    missing_required = sorted(REQUIRED_IB_COLUMNS.difference(set(uploaded_df.columns)))
+    if missing_required:
+        st.error(f"El archivo no parece un CSV IB válido. Faltan columnas: {', '.join(missing_required)}")
+        return
+
+    st.success(f"Archivo cargado correctamente. Filas detectadas: {len(uploaded_df)}")
+    if st.button("Merge upload into master", use_container_width=True):
+        try:
+            summary = merge_uploaded_csv_into_master(uploaded_df)
+            st.success(f"Merge completado. Nuevas filas añadidas: {summary.get('new_rows_added_to_master', 0)}")
+            st.subheader("Import summary")
+            summary_table = {
+                "Uploaded rows": summary.get("rows_uploaded", 0),
+                "Valid rows with TradeID": summary.get("rows_with_tradeid", 0),
+                "Rows without TradeID ignored": summary.get("rows_without_tradeid_dropped", 0),
+                "Rows already existing in master": summary.get("rows_already_existing_master", 0),
+                "New rows added": summary.get("new_rows_added_to_master", 0),
+                "Duplicated TradeID count": summary.get("duplicated_tradeid_count", 0),
+                "Total rows in master": summary.get("total_rows_master", 0),
+            }
+            st.dataframe(pd.DataFrame([summary_table]), use_container_width=True, hide_index=True)
+
+            new_rows = pd.DataFrame(summary.get("new_trades_added", []))
+            st.subheader("Preview of new rows added")
+            preview_columns = [
+                "TradeID",
+                "UnderlyingSymbol",
+                "Description",
+                "TradeDate",
+                "Buy/Sell",
+                "AssetClass",
+                "Quantity",
+                "NetCash",
+            ]
+            if new_rows.empty:
+                st.info("No se añadieron nuevas operaciones.")
+            else:
+                shown_columns = [c for c in preview_columns if c in new_rows.columns]
+                st.dataframe(new_rows[shown_columns], use_container_width=True, hide_index=True)
+
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Error al fusionar el CSV con master: {exc}")
+
+
+def position_chart_view(df: pd.DataFrame) -> None:
+    st.header("Position Chart")
+    open_df = df[df["status"] == "abierta"].copy()
+    if open_df.empty:
+        st.info("No hay opciones abiertas para mostrar.")
+        return
+
+    selected_ticker = st.selectbox("Ticker", sorted(open_df["ticker"].dropna().unique()))
+    ticker_open = open_df[open_df["ticker"] == selected_ticker].copy()
+    if ticker_open.empty:
+        st.info("No hay opciones abiertas para el ticker seleccionado.")
+        return
+
+    period = st.selectbox("Período histórico", ["1mo", "3mo", "6mo", "1y", "2y"], index=2)
+    ticker_open["contract_label"] = ticker_open.apply(
+        lambda row: f"{row['trade_id']} · {row['leg_type']} · {row['action']} · strike {row['strike']} · exp {row['expiration'].date()}",
+        axis=1,
+    )
+    selected_contracts = st.multiselect(
+        "Open option position / contract",
+        options=ticker_open["contract_label"].tolist(),
+        default=ticker_open["contract_label"].tolist(),
+    )
+    if not selected_contracts:
+        st.info("Selecciona al menos un contrato abierto.")
+        return
+    selected_positions = ticker_open[ticker_open["contract_label"].isin(selected_contracts)].copy()
+
+    try:
+        import yfinance as yf
+    except Exception as exc:
+        st.warning(f"No se pudo importar yfinance: {exc}")
+        return
+
+    try:
+        hist = yf.Ticker(selected_ticker).history(period=period, auto_adjust=False)
+    except Exception as exc:
+        st.warning(f"Error descargando datos con yfinance: {exc}")
+        return
+
+    if hist.empty or "Close" not in hist.columns:
+        st.warning("No se pudo obtener histórico de precios para el ticker/período seleccionado.")
+        return
+
+    current_price = float(hist["Close"].dropna().iloc[-1]) if not hist["Close"].dropna().empty else None
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=hist.index,
+            y=hist["Close"],
+            mode="lines",
+            name=f"{selected_ticker} Close",
+            line=dict(color="#1f77b4", width=2),
+        )
+    )
+
+    for _, row in selected_positions.iterrows():
+        leg_type = str(row["leg_type"]).upper()
+        direction = "SHORT" if str(row["action"]).upper() == "SELL" else "LONG"
+        line_color = "#d62728" if leg_type == "PUT" else "#2ca02c"
+        label = f"{row['ticker']} {leg_type} {direction} {row['strike']} exp {row['expiration'].date()}"
+        fig.add_trace(
+            go.Scatter(
+                x=[row["open_date"], row["expiration"]],
+                y=[row["strike"], row["strike"]],
+                mode="lines+text",
+                text=["", label],
+                textposition="top right",
+                name=label,
+                line=dict(color=line_color, width=2, dash="dash"),
+            )
+        )
+
+    fig.update_layout(
+        title=f"{selected_ticker} · Price + Open Option Strikes",
+        xaxis_title="Fecha",
+        yaxis_title="Precio",
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    if current_price is not None:
+        st.write(f"**Current price ({selected_ticker}):** ${current_price:,.2f}")
+    else:
+        st.write("**Current price:** no disponible.")
+
+    selected_positions["direction"] = selected_positions["action"].astype(str).str.upper().map({"SELL": "SHORT", "BUY": "LONG"})
+    selected_positions["net_cash_total"] = (
+        selected_positions["net_cash_total"] if "net_cash_total" in selected_positions.columns else selected_positions["premium"]
+    )
+    selected_positions["position_status"] = (
+        selected_positions["position_status"] if "position_status" in selected_positions.columns else selected_positions["status"]
+    )
+    if current_price is not None:
+        selected_positions["distance_to_strike"] = current_price - selected_positions["strike"]
+        selected_positions["distance_pct"] = (selected_positions["distance_to_strike"] / selected_positions["strike"]) * 100
+    else:
+        selected_positions["distance_to_strike"] = pd.NA
+        selected_positions["distance_pct"] = pd.NA
+
+    st.subheader("Open positions details")
+    st.dataframe(
+        selected_positions[
+            [
+                "ticker",
+                "leg_type",
+                "direction",
+                "strike",
+                "open_date",
+                "expiration",
+                "net_cash_total",
+                "position_status",
+                "distance_to_strike",
+                "distance_pct",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 def main() -> None:
     st.sidebar.title("Seguimiento de opciones")
     mode = st.sidebar.radio("Tema", ["Claro", "Oscuro"])
@@ -212,7 +402,7 @@ def main() -> None:
 
     section = st.sidebar.radio(
         "Navegación",
-        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "Import Summary"],
+        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "Position Chart", "Import Summary", "Upload CSV to Master"],
     )
 
     st.sidebar.subheader("Interactive Brokers")
@@ -283,6 +473,10 @@ def main() -> None:
         ticker_view(df)
     elif section == "Vencimientos":
         expirations_view(df)
+    elif section == "Position Chart":
+        position_chart_view(df)
+    elif section == "Upload CSV to Master":
+        upload_csv_to_master_view()
     else:
         import_summary_view()
 
