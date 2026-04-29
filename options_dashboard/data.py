@@ -234,9 +234,11 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
 
     # Mapeo al esquema actual del dashboard (sin romper vistas existentes)
     normalized = normalized_ib.copy()
-    normalized["strategy_id"] = normalized["contract_key"].map(lambda ck: auto_assignments.get(ck, ("", ""))[0]).replace("", normalized["contract_key"])
+    auto_strategy_id = normalized["contract_key"].map(lambda ck: auto_assignments.get(ck, ("", ""))[0])
+    normalized["strategy_id"] = auto_strategy_id.where(auto_strategy_id.ne(""), normalized["contract_key"])
     normalized["underlying_price"] = 0.0
-    normalized["strategy_type"] = normalized["contract_key"].map(lambda ck: auto_assignments.get(ck, ("", ""))[1]).replace("", "Contrato opción (IB)")
+    auto_strategy_type = normalized["contract_key"].map(lambda ck: auto_assignments.get(ck, ("", ""))[1])
+    normalized["strategy_type"] = auto_strategy_type.where(auto_strategy_type.ne(""), "Contrato opción (IB)")
     normalized["close_date"] = pd.NaT
     normalized["premium"] = normalized["net_cash"].abs()
     normalized["commission"] = 0.0
