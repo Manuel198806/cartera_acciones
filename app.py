@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from options_dashboard.charts import (
@@ -272,6 +273,128 @@ def upload_csv_to_master_view() -> None:
             st.error(f"Error al fusionar el CSV con master: {exc}")
 
 
+def position_chart_view(df: pd.DataFrame) -> None:
+    st.header("Position Chart")
+    open_df = df[df["status"] == "abierta"].copy()
+    if open_df.empty:
+        st.info("No hay opciones abiertas para mostrar.")
+        return
+
+    selected_ticker = st.selectbox("Ticker", sorted(open_df["ticker"].dropna().unique()))
+    ticker_open = open_df[open_df["ticker"] == selected_ticker].copy()
+    if ticker_open.empty:
+        st.info("No hay opciones abiertas para el ticker seleccionado.")
+        return
+
+    period = st.selectbox("Período histórico", ["1mo", "3mo", "6mo", "1y", "2y"], index=2)
+    ticker_open["contract_label"] = ticker_open.apply(
+        lambda row: f"{row['trade_id']} · {row['leg_type']} · {row['action']} · strike {row['strike']} · exp {row['expiration'].date()}",
+        axis=1,
+    )
+    selected_contracts = st.multiselect(
+        "Open option position / contract",
+        options=ticker_open["contract_label"].tolist(),
+        default=ticker_open["contract_label"].tolist(),
+    )
+    if not selected_contracts:
+        st.info("Selecciona al menos un contrato abierto.")
+        return
+    selected_positions = ticker_open[ticker_open["contract_label"].isin(selected_contracts)].copy()
+
+    try:
+        import yfinance as yf
+    except Exception as exc:
+        st.warning(f"No se pudo importar yfinance: {exc}")
+        return
+
+    try:
+        hist = yf.Ticker(selected_ticker).history(period=period, auto_adjust=False)
+    except Exception as exc:
+        st.warning(f"Error descargando datos con yfinance: {exc}")
+        return
+
+    if hist.empty or "Close" not in hist.columns:
+        st.warning("No se pudo obtener histórico de precios para el ticker/período seleccionado.")
+        return
+
+    current_price = float(hist["Close"].dropna().iloc[-1]) if not hist["Close"].dropna().empty else None
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=hist.index,
+            y=hist["Close"],
+            mode="lines",
+            name=f"{selected_ticker} Close",
+            line=dict(color="#1f77b4", width=2),
+        )
+    )
+
+    for _, row in selected_positions.iterrows():
+        leg_type = str(row["leg_type"]).upper()
+        direction = "SHORT" if str(row["action"]).upper() == "SELL" else "LONG"
+        line_color = "#d62728" if leg_type == "PUT" else "#2ca02c"
+        label = f"{row['ticker']} {leg_type} {direction} {row['strike']} exp {row['expiration'].date()}"
+        fig.add_trace(
+            go.Scatter(
+                x=[row["open_date"], row["expiration"]],
+                y=[row["strike"], row["strike"]],
+                mode="lines+text",
+                text=["", label],
+                textposition="top right",
+                name=label,
+                line=dict(color=line_color, width=2, dash="dash"),
+            )
+        )
+
+    fig.update_layout(
+        title=f"{selected_ticker} · Price + Open Option Strikes",
+        xaxis_title="Fecha",
+        yaxis_title="Precio",
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    if current_price is not None:
+        st.write(f"**Current price ({selected_ticker}):** ${current_price:,.2f}")
+    else:
+        st.write("**Current price:** no disponible.")
+
+    selected_positions["direction"] = selected_positions["action"].astype(str).str.upper().map({"SELL": "SHORT", "BUY": "LONG"})
+    selected_positions["net_cash_total"] = (
+        selected_positions["net_cash_total"] if "net_cash_total" in selected_positions.columns else selected_positions["premium"]
+    )
+    selected_positions["position_status"] = (
+        selected_positions["position_status"] if "position_status" in selected_positions.columns else selected_positions["status"]
+    )
+    if current_price is not None:
+        selected_positions["distance_to_strike"] = current_price - selected_positions["strike"]
+        selected_positions["distance_pct"] = (selected_positions["distance_to_strike"] / selected_positions["strike"]) * 100
+    else:
+        selected_positions["distance_to_strike"] = pd.NA
+        selected_positions["distance_pct"] = pd.NA
+
+    st.subheader("Open positions details")
+    st.dataframe(
+        selected_positions[
+            [
+                "ticker",
+                "leg_type",
+                "direction",
+                "strike",
+                "open_date",
+                "expiration",
+                "net_cash_total",
+                "position_status",
+                "distance_to_strike",
+                "distance_pct",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 def main() -> None:
     st.sidebar.title("Seguimiento de opciones")
     mode = st.sidebar.radio("Tema", ["Claro", "Oscuro"])
@@ -279,7 +402,7 @@ def main() -> None:
 
     section = st.sidebar.radio(
         "Navegación",
-        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "Import Summary", "Upload CSV to Master"],
+        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "Position Chart", "Import Summary", "Upload CSV to Master"],
     )
 
     st.sidebar.subheader("Interactive Brokers")
@@ -350,6 +473,8 @@ def main() -> None:
         ticker_view(df)
     elif section == "Vencimientos":
         expirations_view(df)
+    elif section == "Position Chart":
+        position_chart_view(df)
     elif section == "Upload CSV to Master":
         upload_csv_to_master_view()
     else:
