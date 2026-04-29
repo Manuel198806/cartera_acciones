@@ -197,6 +197,79 @@ def merge_latest_into_master(
     return import_summary
 
 
+def merge_uploaded_csv_into_master(
+    uploaded_df: pd.DataFrame,
+    master_file: Path = MASTER_DATA_FILE,
+    summary_file: Path = IMPORT_SUMMARY_FILE,
+) -> dict:
+    """Acumula nuevas filas (por TradeID) desde un CSV subido manualmente hacia master."""
+    master_df = _load_csv(master_file)
+    import_df = uploaded_df.copy()
+
+    warnings: list[str] = []
+    missing_cols = sorted(REQUIRED_IB_COLUMNS.difference(set(import_df.columns)))
+    if missing_cols:
+        warnings.append(f"missing required columns: {', '.join(missing_cols)}")
+
+    uploaded_rows = int(len(import_df))
+    import_df["TradeID"] = _clean_trade_id(import_df.get("TradeID", pd.Series(dtype=str)))
+    with_tradeid = import_df[import_df["TradeID"] != ""].copy()
+    dropped_without_tradeid = uploaded_rows - len(with_tradeid)
+
+    master_rows_before = int(len(master_df))
+    if not master_df.empty:
+        master_df["TradeID"] = _clean_trade_id(master_df.get("TradeID", pd.Series(dtype=str)))
+    master_trade_ids = set(master_df.get("TradeID", pd.Series(dtype=str)).dropna().astype(str))
+
+    existing_mask = with_tradeid["TradeID"].isin(master_trade_ids)
+    already_existing = int(existing_mask.sum())
+    new_rows = with_tradeid[~existing_mask].copy()
+    new_rows_added = int(len(new_rows))
+
+    updated_master = pd.concat([master_df, new_rows], ignore_index=True) if not master_df.empty else new_rows.copy()
+    updated_master["TradeID"] = _clean_trade_id(updated_master.get("TradeID", pd.Series(dtype=str)))
+    updated_master = updated_master[updated_master["TradeID"] != ""].copy()
+    updated_master.drop_duplicates(subset=["TradeID"], keep="first", inplace=True)
+    updated_master.to_csv(master_file, index=False)
+
+    unique_trade_ids = int(updated_master["TradeID"].nunique()) if not updated_master.empty else 0
+    duplicated_trade_ids = int(len(updated_master) - unique_trade_ids)
+
+    if dropped_without_tradeid:
+        warnings.append(f"empty TradeID dropped rows: {dropped_without_tradeid}")
+    if duplicated_trade_ids:
+        warnings.append(f"duplicated TradeID in master: {duplicated_trade_ids}")
+
+    import_summary = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "success": True,
+        "source_used": "manual_csv_upload",
+        "file_loaded": str(master_file),
+        "rows_uploaded": uploaded_rows,
+        "rows_with_tradeid": int(len(with_tradeid)),
+        "rows_without_tradeid_dropped": int(dropped_without_tradeid),
+        "rows_already_existing_master": already_existing,
+        "new_rows_added_to_master": new_rows_added,
+        "total_rows_master": int(len(updated_master)),
+        "unique_tradeid_count": unique_trade_ids,
+        "duplicated_tradeid_count": duplicated_trade_ids,
+        "master_rows_before": master_rows_before,
+        "warnings": warnings,
+        "missing_required_columns": missing_cols,
+        "new_trades_added": new_rows[
+            [
+                c
+                for c in ["TradeID", "UnderlyingSymbol", "Description", "TradeDate", "Buy/Sell", "AssetClass", "Quantity", "NetCash"]
+                if c in new_rows.columns
+            ]
+        ].head(200).to_dict(orient="records"),
+    }
+
+    summary_file.parent.mkdir(parents=True, exist_ok=True)
+    summary_file.write_text(json.dumps(import_summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    return import_summary
+
+
 def load_import_summary(summary_file: Path = IMPORT_SUMMARY_FILE) -> dict | None:
     if not summary_file.exists():
         return None

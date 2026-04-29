@@ -13,26 +13,25 @@ def build_kpis(df: pd.DataFrame) -> dict[str, float]:
     monthly_mask = df["open_date"].dt.to_period("M") == now.to_period("M")
     yearly_mask = df["open_date"].dt.year == now.year
 
-    total_realized = float(df["realized_pnl"].sum())
-    total_unrealized = float(df["unrealized_pnl"].sum())
-    total_pnl = total_realized + total_unrealized
-
     closed_status = {"cerrada", "expirada", "asignada"}
     closed = df[df["status"].isin(closed_status)]
+    open_positions = df[df["status"] == "abierta"]
+
+    total_pnl = float(closed["realized_pnl"].sum())
     winners = (closed["realized_pnl"] > 0).sum()
     win_rate = (winners / len(closed) * 100) if len(closed) else 0.0
 
-    capital = _capital_estimado(df[df["status"] == "abierta"])
+    capital = _capital_estimado(open_positions)
     rentabilidad = (total_pnl / capital * 100) if capital else 0.0
 
     return {
         "pnl_total": total_pnl,
-        "pnl_mensual": float(df.loc[monthly_mask, "realized_pnl"].sum()),
-        "pnl_anual": float(df.loc[yearly_mask, "realized_pnl"].sum()),
-        "prima_total": float(df["premium"].sum()),
+        "pnl_mensual": float(df.loc[monthly_mask & df["status"].isin(closed_status), "realized_pnl"].sum()),
+        "pnl_anual": float(df.loc[yearly_mask & df["status"].isin(closed_status), "realized_pnl"].sum()),
+        "prima_total": float(closed["premium"].sum()),
         "prima_cerrada": float(closed["premium"].sum()),
-        "prima_pendiente": float(df[df["status"] == "abierta"]["premium"].sum()),
-        "operaciones_abiertas": int((df["status"] == "abierta").sum()),
+        "prima_pendiente": float(open_positions["premium"].sum()),
+        "operaciones_abiertas": int(open_positions.shape[0]),
         "operaciones_cerradas": int(df["status"].isin(closed_status).sum()),
         "win_rate": win_rate,
         "capital_usado": capital,

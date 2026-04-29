@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from options_dashboard.config import DATA_DIR, DATA_FILE, DATE_COLUMNS, MASTER_DATA_FILE, REQUIRED_COLUMNS
+from options_dashboard.config import DATA_DIR, DATA_FILE, DATE_COLUMNS, MASTER_DATA_FILE, REQUIRED_COLUMNS, STRATEGY_TAGS_FILE
 
 
 class DataValidationError(Exception):
@@ -168,11 +168,75 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
         contract_results["position_status"] == "OPEN", 0.0
     )
 
+    # Detección automática de estrategias con legs OPENING por ticker/open_date/expiration.
+    opening = normalized_ib[normalized_ib["open_close_indicator"] == "OPENING"].copy()
+    auto_assignments: dict[str, tuple[str, str]] = {}
+    audit_rows: list[dict] = []
+
+    def _pick(g: pd.DataFrame, leg_type: str, action: str, mode: str) -> pd.Series | None:
+        subset = g[(g["leg_type"] == leg_type) & (g["action"] == action)].sort_values("strike")
+        if subset.empty:
+            return None
+        return subset.iloc[0] if mode == "min" else subset.iloc[-1]
+
+    for (ticker, open_date, expiration), group in opening.groupby(["ticker", "open_date", "expiration"], dropna=False):
+        sc = _pick(group, "CALL", "SELL", "min")
+        lc = _pick(group, "CALL", "BUY", "max")
+        sp = _pick(group, "PUT", "SELL", "max")
+        lp = _pick(group, "PUT", "BUY", "min")
+        detected_type = None
+        involved: list[str] = []
+        confidence = "low"
+
+        if sc is not None and lc is not None and sp is not None and lp is not None and lc["strike"] > sc["strike"] and lp["strike"] < sp["strike"]:
+            if abs(sc["strike"] - sp["strike"]) < 1e-9:
+                detected_type = "IRON_BUTTERFLY"
+                confidence = "high"
+            elif sp["strike"] < sc["strike"]:
+                detected_type = "IRON_CONDOR"
+                confidence = "high"
+            involved = [sc["contract_key"], lc["contract_key"], sp["contract_key"], lp["contract_key"]]
+        elif sc is not None and lc is not None and lc["strike"] > sc["strike"]:
+            detected_type = "CALL_CREDIT_SPREAD"
+            confidence = "medium"
+            involved = [sc["contract_key"], lc["contract_key"]]
+        elif sp is not None and lp is not None and lp["strike"] < sp["strike"]:
+            detected_type = "PUT_CREDIT_SPREAD"
+            confidence = "medium"
+            involved = [sp["contract_key"], lp["contract_key"]]
+        elif lc is not None and sc is not None and lc["strike"] < sc["strike"]:
+            detected_type = "CALL_DEBIT_SPREAD"
+            confidence = "medium"
+            involved = [lc["contract_key"], sc["contract_key"]]
+        elif lp is not None and sp is not None and lp["strike"] > sp["strike"]:
+            detected_type = "PUT_DEBIT_SPREAD"
+            confidence = "medium"
+            involved = [lp["contract_key"], sp["contract_key"]]
+
+        if detected_type and involved:
+            anchor = int(round(sc["strike"] if sc is not None else sp["strike"]))
+            strategy_id = f"{ticker}_{detected_type}_{open_date.strftime('%Y%m%d')}_{anchor}"
+            opening_cash = float(group[group["contract_key"].isin(involved)]["net_cash"].sum())
+            for ck in involved:
+                auto_assignments[ck] = (strategy_id, detected_type)
+            audit_rows.append(
+                {
+                    "ticker": ticker,
+                    "open_date": open_date,
+                    "expiration": expiration,
+                    "detected_strategy_type": detected_type,
+                    "strategy_id": strategy_id,
+                    "contracts_included": ", ".join(involved),
+                    "total_opening_credit_debit": opening_cash,
+                    "confidence_level": confidence,
+                }
+            )
+
     # Mapeo al esquema actual del dashboard (sin romper vistas existentes)
     normalized = normalized_ib.copy()
-    normalized["strategy_id"] = normalized["contract_key"]
+    normalized["strategy_id"] = normalized["contract_key"].map(lambda ck: auto_assignments.get(ck, ("", ""))[0]).replace("", normalized["contract_key"])
     normalized["underlying_price"] = 0.0
-    normalized["strategy_type"] = "Contrato opción (IB)"
+    normalized["strategy_type"] = normalized["contract_key"].map(lambda ck: auto_assignments.get(ck, ("", ""))[1]).replace("", "Contrato opción (IB)")
     normalized["close_date"] = pd.NaT
     normalized["premium"] = normalized["net_cash"].abs()
     normalized["commission"] = 0.0
@@ -181,6 +245,22 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
     normalized["status"] = "abierta"
     normalized["notes"] = normalized["description"]
     normalized["quantity"] = normalized["quantity_abs"]
+
+    if STRATEGY_TAGS_FILE.exists():
+        tags = pd.read_csv(STRATEGY_TAGS_FILE, dtype=str)
+        if {"contract_key", "strategy_id", "strategy_type"}.issubset(tags.columns):
+            tags["contract_key"] = tags["contract_key"].astype(str).str.strip()
+            tags = tags.dropna(subset=["contract_key"]).drop_duplicates(subset=["contract_key"], keep="last")
+            normalized = normalized.merge(
+                tags[["contract_key", "strategy_id", "strategy_type"]].rename(
+                    columns={"strategy_id": "manual_strategy_id", "strategy_type": "manual_strategy_type"}
+                ),
+                on="contract_key",
+                how="left",
+            )
+            normalized["strategy_id"] = normalized["manual_strategy_id"].fillna(normalized["strategy_id"])
+            normalized["strategy_type"] = normalized["manual_strategy_type"].fillna(normalized["strategy_type"])
+            normalized.drop(columns=["manual_strategy_id", "manual_strategy_type"], inplace=True)
     normalized = normalized.merge(
         contract_results[["contract_key", "position_status", "realized_pnl", "pending_cash"]],
         on="contract_key",
@@ -219,6 +299,7 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
     normalized.attrs["dropped_rows_count"] = int(raw_rows_count - len(normalized_ib))
     normalized.attrs["normalized_preview"] = normalized_ib.head(10).copy()
     normalized.attrs["contract_results"] = contract_results
+    normalized.attrs["strategy_detection_audit"] = pd.DataFrame(audit_rows)
     return normalized
 
 
