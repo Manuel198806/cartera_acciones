@@ -20,7 +20,13 @@ from options_dashboard.data import (
     load_trades,
     resolve_default_data_file,
 )
-from options_dashboard.ib_flex import download_latest_ib_csv, load_import_summary, merge_latest_into_master
+from options_dashboard.ib_flex import (
+    REQUIRED_IB_COLUMNS,
+    download_latest_ib_csv,
+    load_import_summary,
+    merge_latest_into_master,
+    merge_uploaded_csv_into_master,
+)
 from options_dashboard.metrics import build_kpis, cumulative_pnl, monthly_pnl
 
 st.set_page_config(page_title="Dashboard de Opciones", layout="wide")
@@ -206,6 +212,66 @@ def import_summary_view() -> None:
         st.success("Sin warnings en la última importación.")
 
 
+def upload_csv_to_master_view() -> None:
+    st.header("Upload CSV to Master")
+    st.write("Sube un archivo CSV de Interactive Brokers para fusionarlo con `Consulta_master.csv`.")
+    uploaded_file = st.file_uploader("Selecciona CSV de IB", type=["csv"])
+
+    if not uploaded_file:
+        return
+
+    try:
+        uploaded_df = pd.read_csv(uploaded_file, dtype=str)
+    except Exception as exc:
+        st.error(f"No se pudo leer el CSV subido: {exc}")
+        return
+
+    missing_required = sorted(REQUIRED_IB_COLUMNS.difference(set(uploaded_df.columns)))
+    if missing_required:
+        st.error(f"El archivo no parece un CSV IB válido. Faltan columnas: {', '.join(missing_required)}")
+        return
+
+    st.success(f"Archivo cargado correctamente. Filas detectadas: {len(uploaded_df)}")
+    if st.button("Merge upload into master", use_container_width=True):
+        try:
+            summary = merge_uploaded_csv_into_master(uploaded_df)
+            st.success(f"Merge completado. Nuevas filas añadidas: {summary.get('new_rows_added_to_master', 0)}")
+            st.subheader("Import summary")
+            summary_table = {
+                "Uploaded rows": summary.get("rows_uploaded", 0),
+                "Valid rows with TradeID": summary.get("rows_with_tradeid", 0),
+                "Rows without TradeID ignored": summary.get("rows_without_tradeid_dropped", 0),
+                "Rows already existing in master": summary.get("rows_already_existing_master", 0),
+                "New rows added": summary.get("new_rows_added_to_master", 0),
+                "Duplicated TradeID count": summary.get("duplicated_tradeid_count", 0),
+                "Total rows in master": summary.get("total_rows_master", 0),
+            }
+            st.dataframe(pd.DataFrame([summary_table]), use_container_width=True, hide_index=True)
+
+            new_rows = pd.DataFrame(summary.get("new_trades_added", []))
+            st.subheader("Preview of new rows added")
+            preview_columns = [
+                "TradeID",
+                "UnderlyingSymbol",
+                "Description",
+                "TradeDate",
+                "Buy/Sell",
+                "AssetClass",
+                "Quantity",
+                "NetCash",
+            ]
+            if new_rows.empty:
+                st.info("No se añadieron nuevas operaciones.")
+            else:
+                shown_columns = [c for c in preview_columns if c in new_rows.columns]
+                st.dataframe(new_rows[shown_columns], use_container_width=True, hide_index=True)
+
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Error al fusionar el CSV con master: {exc}")
+
+
 def main() -> None:
     st.sidebar.title("Seguimiento de opciones")
     mode = st.sidebar.radio("Tema", ["Claro", "Oscuro"])
@@ -213,7 +279,7 @@ def main() -> None:
 
     section = st.sidebar.radio(
         "Navegación",
-        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "Import Summary"],
+        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "Import Summary", "Upload CSV to Master"],
     )
 
     st.sidebar.subheader("Interactive Brokers")
@@ -284,6 +350,8 @@ def main() -> None:
         ticker_view(df)
     elif section == "Vencimientos":
         expirations_view(df)
+    elif section == "Upload CSV to Master":
+        upload_csv_to_master_view()
     else:
         import_summary_view()
 
