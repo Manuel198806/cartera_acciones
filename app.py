@@ -42,7 +42,20 @@ def apply_theme(mode: str) -> None:
         st.markdown(
             """
             <style>
-                .stApp { background-color: #0e1117; color: #f5f5f5; }
+                .stApp { background-color: #121622; color: #e8ecf3; }
+                div[data-testid="stMetric"] {
+                    background: linear-gradient(180deg, #1b2133 0%, #171d2d 100%);
+                    border: 1px solid #2a334a;
+                    border-radius: 14px;
+                    padding: 12px 14px;
+                }
+                div[data-testid="stMetricLabel"] { color: #9bb0d3; }
+                div[data-testid="stMetricValue"] { color: #dbe5ff; }
+                .gain-text { color: #5fd08a; font-weight: 600; }
+                .loss-text { color: #ff7d7d; font-weight: 600; }
+                .neutral-text { color: #8ea2ff; font-weight: 600; }
+                div[data-testid="stDataFrame"] { border-radius: 12px; overflow: hidden; }
+                .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
             </style>
             """,
             unsafe_allow_html=True,
@@ -50,26 +63,27 @@ def apply_theme(mode: str) -> None:
 
 
 def render_kpis(kpis: dict[str, float]) -> None:
-    row1 = st.columns(6)
-    row2 = st.columns(5)
+    top = st.columns(5)
+    top[0].metric("General P&L", format_currency(kpis["pnl_total"]))
+    top[1].metric("Annual P&L", format_currency(kpis["pnl_anual"]))
+    top[2].metric("Monthly P&L", format_currency(kpis["pnl_mensual"]))
+    top[3].metric("Open Positions", int(kpis["operaciones_abiertas"]))
+    top[4].metric("Closed Positions", int(kpis["operaciones_cerradas"]))
 
-    row1[0].metric("P&L Total", format_currency(kpis["pnl_total"]))
-    row1[1].metric("P&L Mensual", format_currency(kpis["pnl_mensual"]))
-    row1[2].metric("P&L Anual", format_currency(kpis["pnl_anual"]))
-    row1[3].metric("Prima ganada", format_currency(kpis["prima_total"]))
-    row1[4].metric("Prima cerrada", format_currency(kpis["prima_cerrada"]))
-    row1[5].metric("Prima pendiente", format_currency(kpis["prima_pendiente"]))
-
-    row2[0].metric("Operaciones abiertas", int(kpis["operaciones_abiertas"]))
-    row2[1].metric("Operaciones cerradas", int(kpis["operaciones_cerradas"]))
-    row2[2].metric("Win rate", f"{kpis['win_rate']:.1f}%")
-    row2[3].metric("Capital usado", format_currency(kpis["capital_usado"]))
-    row2[4].metric("Rentabilidad/Capital", f"{kpis['rentabilidad_capital']:.2f}%")
+    with st.expander("Secondary KPIs", expanded=False):
+        row2 = st.columns(6)
+        row2[0].metric("Win rate", f"{kpis['win_rate']:.1f}%")
+        row2[1].metric("Capital used", format_currency(kpis["capital_usado"]))
+        row2[2].metric("Return on capital", f"{kpis['rentabilidad_capital']:.2f}%")
+        row2[3].metric("Total premium", format_currency(kpis["prima_total"]))
+        row2[4].metric("Closed premium", format_currency(kpis["prima_cerrada"]))
+        row2[5].metric("Pending premium", format_currency(kpis["prima_pendiente"]))
 
 
 def dashboard_view(df: pd.DataFrame) -> None:
     st.header("Dashboard principal")
-    render_kpis(build_kpis(df))
+    kpis = build_kpis(df)
+    render_kpis(kpis)
     st.caption("Open option premium is shown as pending until the position is closed.")
 
     monthly = monthly_pnl(df)
@@ -90,6 +104,10 @@ def dashboard_view(df: pd.DataFrame) -> None:
     c7, c8 = st.columns(2)
     c7.plotly_chart(chart_exposure_by_ticker(df), use_container_width=True)
     c8.plotly_chart(chart_expiration_calendar(df), use_container_width=True)
+
+    pnl = kpis["pnl_total"]
+    pnl_class = "gain-text" if pnl > 0 else "loss-text" if pnl < 0 else "neutral-text"
+    st.markdown(f"<div class='{pnl_class}'>General P&L status: {format_currency(pnl)}</div>", unsafe_allow_html=True)
 
     audit = df.attrs.get("strategy_detection_audit")
     if audit is not None:
@@ -405,7 +423,7 @@ def position_chart_view(df: pd.DataFrame) -> None:
 
 def main() -> None:
     st.sidebar.title("Seguimiento de opciones")
-    mode = st.sidebar.radio("Tema", ["Claro", "Oscuro"])
+    mode = st.sidebar.radio("Tema", ["Claro", "Oscuro"], index=1)
     apply_theme(mode)
 
     section = st.sidebar.radio(
