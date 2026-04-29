@@ -49,7 +49,7 @@ def render_kpis(kpis: dict[str, float]) -> None:
     row1[0].metric("P&L Total", format_currency(kpis["pnl_total"]))
     row1[1].metric("P&L Mensual", format_currency(kpis["pnl_mensual"]))
     row1[2].metric("P&L Anual", format_currency(kpis["pnl_anual"]))
-    row1[3].metric("Prima total", format_currency(kpis["prima_total"]))
+    row1[3].metric("Prima ganada", format_currency(kpis["prima_total"]))
     row1[4].metric("Prima cerrada", format_currency(kpis["prima_cerrada"]))
     row1[5].metric("Prima pendiente", format_currency(kpis["prima_pendiente"]))
 
@@ -63,6 +63,7 @@ def render_kpis(kpis: dict[str, float]) -> None:
 def dashboard_view(df: pd.DataFrame) -> None:
     st.header("Dashboard principal")
     render_kpis(build_kpis(df))
+    st.caption("Open option premium is shown as pending until the position is closed.")
 
     monthly = monthly_pnl(df)
     cumulative = cumulative_pnl(df)
