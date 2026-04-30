@@ -166,10 +166,26 @@ def get_filtered_option_chain(ticker: str, expiry: str, underlying_price: float 
         if underlying_price is None:
             underlying_price = get_underlying_contract(ticker).get("market_price")
         if underlying_price is None:
-            raise ValueError("No se pudo obtener el precio del subyacente para filtrar strikes.")
+            if not metadata["strikes"]:
+                raise ValueError("No hay strikes disponibles para construir la cadena filtrada.")
+            underlying_price = float(pd.Series(metadata["strikes"]).median())
+            logger.warning(
+                "Underlying price missing; using strikes median fallback ticker=%s expiry=%s fallback_price=%s",
+                ticker,
+                expiry,
+                underlying_price,
+            )
         lo = underlying_price * (1 - strike_range_pct)
         hi = underlying_price * (1 + strike_range_pct)
         strikes = [s for s in metadata["strikes"] if lo <= s <= hi]
+        if not strikes:
+            strikes = sorted(metadata["strikes"], key=lambda x: abs(x - underlying_price))[:10]
+            logger.warning(
+                "No strikes in pct range; using nearest strikes fallback ticker=%s expiry=%s fallback_count=%s",
+                ticker,
+                expiry,
+                len(strikes),
+            )
         logger.info("Filtering strikes ticker=%s expiry=%s strike_range=%s-%s strikes_found=%s", ticker, expiry, lo, hi, len(strikes))
         contracts = [Option(symbol=ticker.upper().strip(), lastTradeDateOrContractMonth=expiry, strike=float(strike), right=right, exchange="SMART", currency="USD") for right in ("C", "P") for strike in strikes]
         return get_option_quotes_for_contracts(contracts, ticker=ticker, expiry=expiry)
