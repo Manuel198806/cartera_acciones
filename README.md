@@ -146,3 +146,40 @@ streamlit run app.py
 - Añadir autenticación y persistencia.
 - Separar vistas en páginas nativas de Streamlit para crecimiento modular.
 - Incorporar testing unitario de métricas y validaciones de esquemas.
+
+## Options Strategy Builder (IB API, read-only)
+
+Nueva sección **Options Strategy Builder** integrada en el dashboard:
+
+- Flujo ligero: ticker -> expirations/strikes metadata -> cadena filtrada por expiry/rango.
+- Cache local en SQLite (`data/options_cache.sqlite`) para interacción rápida.
+- Botón **Update Chain** para refresco manual.
+- Uso exclusivo de IB API en modo lectura (sin órdenes).
+- Soporta fase inicial con estrategia **Cash-Secured Put** + payoff chart + métricas.
+
+### Configuración TWS / IB Gateway
+
+1. Habilitar `Enable ActiveX and Socket Clients`.
+2. Activar `Read-Only API`.
+3. Configurar `Socket port = 7496`.
+4. Verificar conexión local `127.0.0.1`.
+
+### Notas de seguridad
+
+- Esta app **nunca** coloca, modifica o cancela órdenes.
+- El módulo IB implementado usa llamadas de lectura (contratos, market data, posiciones).
+- Las métricas y payoff son estimaciones para análisis y soporte de decisión.
+
+### Cómo refrescar cadena
+
+1. Entrar en `Options Strategy Builder`.
+2. Elegir ticker y expiration.
+3. Pulsar `Update Chain` para forzar descarga de cadena filtrada.
+4. Si cache reciente (<5 min), se reutiliza automáticamente.
+
+### Cache
+
+Se crea una base SQLite con tablas:
+- `option_chain_cache`
+- `saved_strategy_simulations`
+- `strategy_legs`

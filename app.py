@@ -29,6 +29,16 @@ from options_dashboard.ib_flex import (
     merge_uploaded_csv_into_master,
 )
 from options_dashboard.metrics import build_kpis, cumulative_pnl, monthly_pnl
+from options_dashboard.ib_options_api import (
+    connect_ib,
+    disconnect_ib,
+    get_filtered_option_chain,
+    get_option_chain_metadata,
+    get_underlying_contract,
+)
+from options_dashboard.options_cache import get_cached_chain, init_db, upsert_chain
+from options_dashboard.strategy_builder import cash_secured_put_metrics, default_leg_price, payoff_at_expiration
+import numpy as np
 
 st.set_page_config(page_title="Dashboard de Opciones", layout="wide")
 
@@ -395,6 +405,76 @@ def position_chart_view(df: pd.DataFrame) -> None:
     )
 
 
+def options_strategy_builder_view() -> None:
+    st.header("Options Strategy Builder")
+    st.caption("Modo solo análisis/simulación. Esta sección NO envía órdenes a Interactive Brokers.")
+    init_db()
+
+    colc1, colc2, colc3 = st.columns([2,1,1])
+    ticker = colc1.text_input("Ticker", value="KO").upper().strip()
+    strike_range_pct = colc2.slider("Rango strikes (+/-)", 0.05, 0.5, 0.2, 0.05)
+    force_refresh = colc3.button("Update Chain", use_container_width=True)
+
+    if not ticker:
+        return
+    try:
+        underlying = get_underlying_contract(ticker)
+        metadata = get_option_chain_metadata(ticker)
+    except Exception as exc:
+        st.warning(f"IB no disponible o error obteniendo metadatos: {exc}")
+        return
+
+    st.write(f"**Underlying price:** {underlying.get('market_price') or 'N/A'}")
+    expiry = st.selectbox("Expiration", metadata["expirations"])
+
+    cached = get_cached_chain(ticker, expiry, max_age_minutes=5)
+    if cached.empty or force_refresh:
+        try:
+            chain = get_filtered_option_chain(ticker, expiry, underlying.get("market_price"), strike_range_pct)
+            upsert_chain(ticker, expiry, underlying.get("market_price") or 0.0, chain)
+            cached = get_cached_chain(ticker, expiry, max_age_minutes=1440)
+            st.success("Cadena actualizada y guardada en SQLite cache.")
+        except Exception as exc:
+            st.error(f"No se pudo actualizar cadena: {exc}")
+            return
+
+    strategy = st.selectbox("Strategy", ["Cash-Secured Put"])
+    chain = cached.copy()
+    st.dataframe(chain[["strike","right","bid","ask","mid","delta","theta","vega","gamma","updated_at"]], use_container_width=True, hide_index=True)
+
+    puts = chain[chain["right"] == "P"].sort_values("strike")
+    if puts.empty:
+        st.info("No hay puts en la cadena filtrada.")
+        return
+    selected = st.selectbox("Select put strike", puts["strike"].tolist())
+    mode = st.radio("Pricing mode", ["conservative", "mid"], horizontal=True)
+
+    leg = puts[puts["strike"] == selected].iloc[0].copy()
+    leg["action"] = "SELL"
+    leg["quantity"] = 1
+    leg["selected_price"] = default_leg_price(leg, "mid" if mode == "mid" else "conservative")
+    legs = pd.DataFrame([leg])
+    metrics = cash_secured_put_metrics(leg)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Net Credit", f"${metrics['net_credit']:.2f}")
+    c2.metric("Max Profit", f"${metrics['max_profit']:.2f}")
+    c3.metric("Max Loss", f"${metrics['max_loss']:.2f}")
+    c4.metric("Breakeven", f"${metrics['breakeven_low']:.2f}")
+
+    spot = underlying.get("market_price") or selected
+    grid = np.linspace(max(0.01, spot*0.5), spot*1.5, 120)
+    payoff = payoff_at_expiration(legs, grid)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=grid, y=payoff, mode="lines", name="P/L at Expiration", line=dict(color="#22c55e", width=3)))
+    fig.add_hline(y=0, line_dash="dash", line_color="#94a3b8")
+    fig.add_vline(x=spot, line_dash="dot", line_color="#38bdf8")
+    fig.update_layout(template="plotly_dark", title="Payoff chart", xaxis_title="Underlying price", yaxis_title="P/L (USD)")
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.warning("Datos pueden ser retrasados y/o incompletos. Cálculos son estimaciones para soporte de decisión.")
+
 def main() -> None:
     st.sidebar.title("Seguimiento de opciones")
     mode = st.sidebar.radio("Tema", ["Claro", "Oscuro"])
@@ -402,7 +482,7 @@ def main() -> None:
 
     section = st.sidebar.radio(
         "Navegación",
-        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "Position Chart", "Import Summary", "Upload CSV to Master"],
+        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "Position Chart", "Options Strategy Builder", "Import Summary", "Upload CSV to Master"],
     )
 
     st.sidebar.subheader("Interactive Brokers")
@@ -475,6 +555,8 @@ def main() -> None:
         expirations_view(df)
     elif section == "Position Chart":
         position_chart_view(df)
+    elif section == "Options Strategy Builder":
+        options_strategy_builder_view()
     elif section == "Upload CSV to Master":
         upload_csv_to_master_view()
     else:
