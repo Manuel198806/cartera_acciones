@@ -3,6 +3,8 @@ from __future__ import annotations
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from options_dashboard.charts import (
     chart_cumulative_pnl,
@@ -29,6 +31,18 @@ from options_dashboard.ib_flex import (
     merge_uploaded_csv_into_master,
 )
 from options_dashboard.metrics import build_kpis, cumulative_pnl, monthly_pnl
+from options_dashboard.ib_options_api import (
+    LOG_PATH as OPTIONS_BUILDER_LOG_PATH,
+    connect_ib,
+    disconnect_ib,
+    get_filtered_option_chain,
+    get_option_chain_metadata,
+    get_underlying_contract,
+)
+from options_dashboard.options_cache import get_cached_chain, init_db, upsert_chain
+from options_dashboard.strategy_builder import cash_secured_put_metrics, default_leg_price, payoff_at_expiration
+from options_dashboard.options_builder_logging import LOG_FILE as OPTIONS_BUILDER_LOG_FILE, log_error, log_step
+import numpy as np
 
 st.set_page_config(page_title="Dashboard de Opciones", layout="wide")
 
@@ -395,6 +409,158 @@ def position_chart_view(df: pd.DataFrame) -> None:
     )
 
 
+def options_strategy_builder_view() -> None:
+    st.header("Options Strategy Builder")
+    st.caption("Modo solo análisis/simulación. Esta sección NO envía órdenes a Interactive Brokers.")
+    log_step("Options Strategy Builder view start")
+    init_db()
+
+    st.session_state.setdefault("chain_loaded", False)
+    st.session_state.setdefault("current_ticker", None)
+    st.session_state.setdefault("current_expiry", None)
+    st.session_state.setdefault("last_action", "init")
+    st.session_state.setdefault("last_ib_duration", 0.0)
+    st.session_state.setdefault("cache_status", "unknown")
+    st.session_state.setdefault("contracts_loaded", 0)
+    st.session_state.setdefault("last_error", "")
+    st.session_state.setdefault("metadata", None)
+    st.session_state.setdefault("underlying", None)
+
+    colc1, colc2, colc3 = st.columns([2,1,1])
+    ticker = colc1.text_input("Ticker", value="KO").upper().strip()
+    strike_range_pct = colc2.slider("Rango strikes (+/-)", 0.05, 0.5, 0.2, 0.05)
+    force_refresh = colc3.button("Update Chain", use_container_width=True)
+    log_step(f"Ticker selected: {ticker}")
+
+    if not ticker:
+        return
+
+    ticker_changed = st.session_state["current_ticker"] != ticker
+    if ticker_changed or st.session_state["metadata"] is None:
+        with st.spinner("Loading ticker metadata..."):
+            try:
+                underlying = get_underlying_contract(ticker)
+                metadata = get_option_chain_metadata(ticker)
+                st.session_state["underlying"] = underlying
+                st.session_state["metadata"] = metadata
+            except Exception as exc:
+                log_error("Error loading IB metadata", exc)
+                st.session_state["last_error"] = str(exc)
+                st.warning(f"IB no disponible o error obteniendo metadatos. Revisa log: {OPTIONS_BUILDER_LOG_PATH}")
+                return
+    else:
+        underlying = st.session_state["underlying"]
+        metadata = st.session_state["metadata"]
+
+    st.write(f"**Underlying price:** {underlying.get('market_price') or 'N/A'}")
+    expiry = st.selectbox("Expiration", metadata["expirations"])
+    log_step(f"Expiration selected: {expiry}")
+
+    expiry_changed = st.session_state["current_expiry"] != expiry
+    needs_load = force_refresh or ticker_changed or expiry_changed or (not st.session_state["chain_loaded"])
+
+    cached = get_cached_chain(ticker, expiry, max_age_minutes=5)
+    log_step(f"Cache lookup for {ticker} {expiry}")
+    if not cached.empty:
+        st.session_state["cache_status"] = "hit"
+        log_step("Cache hit")
+    else:
+        st.session_state["cache_status"] = "miss"
+        log_step("Cache miss")
+
+    if needs_load:
+        if not cached.empty and not force_refresh:
+            chain = cached
+            st.session_state["last_action"] = "loaded_from_cache"
+        else:
+            st.session_state["last_action"] = "calling_ib"
+            log_step("Cache miss → calling IB")
+            with st.spinner("Loading option chain..."):
+                start_t = time.perf_counter()
+                try:
+                    with ThreadPoolExecutor(max_workers=1) as ex:
+                        fut = ex.submit(get_filtered_option_chain, ticker, expiry, underlying.get("market_price"), strike_range_pct)
+                        chain = fut.result(timeout=10)
+                    st.session_state["last_ib_duration"] = time.perf_counter() - start_t
+                    if len(chain) > 100:
+                        chain = chain.head(100)
+                    upsert_chain(ticker, expiry, underlying.get("market_price") or 0.0, chain)
+                    log_step(f"Cache writes complete rows={len(chain)}")
+                    st.success("Cadena actualizada y guardada en SQLite cache.")
+                    st.session_state["cache_status"] = "refreshed"
+                except TimeoutError as exc:
+                    st.session_state["last_ib_duration"] = time.perf_counter() - start_t
+                    st.session_state["last_error"] = "IB timeout > 10s"
+                    log_error("IB call timeout", exc)
+                    st.warning(f"IB tardó demasiado (>10s). Revisa log: {OPTIONS_BUILDER_LOG_PATH}")
+                    chain = cached
+                except Exception as exc:
+                    st.session_state["last_ib_duration"] = time.perf_counter() - start_t
+                    st.session_state["last_error"] = str(exc)
+                    log_error("Error during IB call", exc)
+                    st.warning(f"No se pudo actualizar cadena desde IB. Revisa log: {OPTIONS_BUILDER_LOG_PATH}")
+                    chain = cached
+    else:
+        chain = cached
+        st.session_state["last_action"] = "strike_or_ui_change_cache_only"
+
+    st.session_state["chain_loaded"] = not chain.empty
+    st.session_state["current_ticker"] = ticker
+    st.session_state["current_expiry"] = expiry
+    st.session_state["contracts_loaded"] = int(len(chain))
+
+    if chain.empty:
+        st.info("No hay datos de cadena disponibles todavía.")
+        return
+
+    strategy = st.selectbox("Strategy", ["Cash-Secured Put"])
+    chain = chain.copy()
+    st.dataframe(chain[["strike","right","bid","ask","mid","delta","theta","vega","gamma","updated_at"]], use_container_width=True, hide_index=True)
+
+    puts = chain[chain["right"] == "P"].sort_values("strike")
+    if puts.empty:
+        st.info("No hay puts en la cadena filtrada.")
+        return
+    selected = st.selectbox("Select put strike", puts["strike"].tolist())
+    log_step(f"Strike selected: {selected}")
+    mode = st.radio("Pricing mode", ["conservative", "mid"], horizontal=True)
+
+    leg = puts[puts["strike"] == selected].iloc[0].copy()
+    leg["action"] = "SELL"
+    leg["quantity"] = 1
+    leg["selected_price"] = default_leg_price(leg, "mid" if mode == "mid" else "conservative")
+    legs = pd.DataFrame([leg])
+    metrics = cash_secured_put_metrics(leg)
+    log_step("Strategy calculations completed")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Net Credit", f"${metrics['net_credit']:.2f}")
+    c2.metric("Max Profit", f"${metrics['max_profit']:.2f}")
+    c3.metric("Max Loss", f"${metrics['max_loss']:.2f}")
+    c4.metric("Breakeven", f"${metrics['breakeven_low']:.2f}")
+
+    spot = underlying.get("market_price") or selected
+    grid = np.linspace(max(0.01, spot*0.5), spot*1.5, 120)
+    payoff = payoff_at_expiration(legs, grid)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=grid, y=payoff, mode="lines", name="P/L at Expiration", line=dict(color="#22c55e", width=3)))
+    fig.add_hline(y=0, line_dash="dash", line_color="#94a3b8")
+    fig.add_vline(x=spot, line_dash="dot", line_color="#38bdf8")
+    fig.update_layout(template="plotly_dark", title="Payoff chart", xaxis_title="Underlying price", yaxis_title="P/L (USD)")
+    st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("Debug Info", expanded=False):
+        st.write(f"Last action: {st.session_state['last_action']}")
+        st.write(f"Last IB call duration (s): {st.session_state['last_ib_duration']:.2f}")
+        st.write(f"Contracts loaded: {st.session_state['contracts_loaded']}")
+        st.write(f"Cache status: {st.session_state['cache_status']}")
+        st.write(f"Last error: {st.session_state['last_error'] or 'N/A'}")
+        st.write(f"Log file: {OPTIONS_BUILDER_LOG_FILE}")
+
+    st.warning("Datos pueden ser retrasados y/o incompletos. Cálculos son estimaciones para soporte de decisión.")
+
+
 def main() -> None:
     st.sidebar.title("Seguimiento de opciones")
     mode = st.sidebar.radio("Tema", ["Claro", "Oscuro"])
@@ -402,7 +568,7 @@ def main() -> None:
 
     section = st.sidebar.radio(
         "Navegación",
-        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "Position Chart", "Import Summary", "Upload CSV to Master"],
+        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "Position Chart", "Options Strategy Builder", "Import Summary", "Upload CSV to Master"],
     )
 
     st.sidebar.subheader("Interactive Brokers")
@@ -475,6 +641,8 @@ def main() -> None:
         expirations_view(df)
     elif section == "Position Chart":
         position_chart_view(df)
+    elif section == "Options Strategy Builder":
+        options_strategy_builder_view()
     elif section == "Upload CSV to Master":
         upload_csv_to_master_view()
     else:
