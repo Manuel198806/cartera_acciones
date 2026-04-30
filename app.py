@@ -423,6 +423,8 @@ def options_strategy_builder_view() -> None:
     st.session_state.setdefault("cache_status", "unknown")
     st.session_state.setdefault("contracts_loaded", 0)
     st.session_state.setdefault("last_error", "")
+    st.session_state.setdefault("metadata", None)
+    st.session_state.setdefault("underlying", None)
 
     colc1, colc2, colc3 = st.columns([2,1,1])
     ticker = colc1.text_input("Ticker", value="KO").upper().strip()
@@ -433,20 +435,27 @@ def options_strategy_builder_view() -> None:
     if not ticker:
         return
 
-    try:
-        underlying = get_underlying_contract(ticker)
-        metadata = get_option_chain_metadata(ticker)
-    except Exception as exc:
-        log_error("Error loading IB metadata", exc)
-        st.session_state["last_error"] = str(exc)
-        st.warning(f"IB no disponible o error obteniendo metadatos. Revisa log: {OPTIONS_BUILDER_LOG_PATH}")
-        return
+    ticker_changed = st.session_state["current_ticker"] != ticker
+    if ticker_changed or st.session_state["metadata"] is None:
+        with st.spinner("Loading ticker metadata..."):
+            try:
+                underlying = get_underlying_contract(ticker)
+                metadata = get_option_chain_metadata(ticker)
+                st.session_state["underlying"] = underlying
+                st.session_state["metadata"] = metadata
+            except Exception as exc:
+                log_error("Error loading IB metadata", exc)
+                st.session_state["last_error"] = str(exc)
+                st.warning(f"IB no disponible o error obteniendo metadatos. Revisa log: {OPTIONS_BUILDER_LOG_PATH}")
+                return
+    else:
+        underlying = st.session_state["underlying"]
+        metadata = st.session_state["metadata"]
 
     st.write(f"**Underlying price:** {underlying.get('market_price') or 'N/A'}")
     expiry = st.selectbox("Expiration", metadata["expirations"])
     log_step(f"Expiration selected: {expiry}")
 
-    ticker_changed = st.session_state["current_ticker"] != ticker
     expiry_changed = st.session_state["current_expiry"] != expiry
     needs_load = force_refresh or ticker_changed or expiry_changed or (not st.session_state["chain_loaded"])
 

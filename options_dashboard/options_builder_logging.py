@@ -1,23 +1,29 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from options_dashboard.config import BASE_DIR
 
 LOG_FILE = BASE_DIR / "logs" / "options_builder.log"
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    filename=str(LOG_FILE),
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
+LOGGER_NAME = "options_builder"
+logger = logging.getLogger(LOGGER_NAME)
+if not logger.handlers:
+    handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+# Reduce noisy 3rd-party logs that can block/flood in Streamlit reruns.
+logging.getLogger("ib_insync").setLevel(logging.WARNING)
+logging.getLogger("eventkit").setLevel(logging.WARNING)
 
 
 def log_step(message: str) -> None:
-    logging.info(message)
+    logger.info(message)
 
 
 def log_error(message: str, e: Exception | None = None) -> None:
-    logging.error(f"{message} | {str(e) if e else ''}", exc_info=True)
+    logger.error(f"{message} | {str(e) if e else ''}", exc_info=True)

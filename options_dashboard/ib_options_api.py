@@ -11,6 +11,7 @@ import pandas as pd
 
 from options_dashboard.async_compat import ensure_event_loop
 from options_dashboard.config import BASE_DIR
+from options_dashboard.options_builder_logging import log_error, log_step
 
 LOG_PATH = BASE_DIR / "logs" / "options_builder.log"
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -80,10 +81,12 @@ def connect_ib(host: str = "127.0.0.1", port: int = 7496, client_id: int = 10) -
     if _ib is not None and _ib.isConnected():
         return _ib
     logger.info("Connecting to IB host=%s port=%s client_id=%s", host, port, client_id)
+    log_step(f"IB connection start host={host} port={port} client_id={client_id}")
     ib = IB()
-    ib.connect(host, port, clientId=client_id, timeout=8)
+    ib.connect(host, port, clientId=client_id, timeout=8, readonly=True)
     ib.reqMarketDataType(3)
     _ib = ib
+    log_step("IB connection established (readonly)")
     return ib
 
 
