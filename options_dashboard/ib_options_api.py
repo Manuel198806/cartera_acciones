@@ -9,6 +9,9 @@ from typing import Any
 
 import pandas as pd
 
+from options_dashboard.async_compat import ensure_event_loop
+
+ensure_event_loop()
 try:
     from ib_insync import IB, Option, Stock, util
 except Exception:  # pragma: no cover - optional dependency at runtime
@@ -31,10 +34,7 @@ _ib: IB | None = None
 
 
 def _ensure_asyncio_loop() -> None:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
+    ensure_event_loop()
 
 
 def _ensure_ib_available() -> None:
