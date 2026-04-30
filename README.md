@@ -55,7 +55,41 @@ El repositorio original estaba en Python sin framework web definido. Se implemen
 - Tema claro/oscuro y navegación por sidebar.
 - Manejo básico de errores por dataset ausente o columnas incompletas.
 
-## Dataset mock
+## Dataset
+La app detecta automáticamente los CSV en `data/`:
+
+- Si existe `Consulta_master.csv`, lo usa por defecto.
+- Si no existe, intenta `Consulta.csv`.
+- Si no existe, usa `mock_trades.csv`.
+- En la barra lateral puedes seleccionar otro CSV disponible desde un desplegable.
+
+### Descarga IB Flex Query (acumulación incremental)
+
+Desde la barra lateral (`Interactive Brokers`) puedes lanzar la descarga:
+
+1. `SendRequest` (token + query_id) para obtener `ReferenceCode`.
+2. `GetStatement` para descargar CSV.
+
+Flujo de archivos:
+
+- Descarga temporal: `data/Consulta_latest.csv`
+- Fuente de verdad acumulada: `data/Consulta_master.csv`
+
+Reglas de acumulación:
+
+- Clave única: `TradeID`
+- Solo se agregan filas nuevas (TradeID no existente en master)
+- Se descartan filas sin `TradeID`
+- Se guarda resumen de importación en `data/import_summary.json`
+
+Para IB se incluye una capa de normalización automática:
+
+- Sin preprocesado manual en Excel.
+- Conversión de tipos y columnas al esquema interno.
+- Filtro automático a últimos 12 meses por `open_date`.
+- Vinculación de aperturas/cierres por contrato (`strategy_id` por ciclo).
+
+### Mock de respaldo
 Se incluye `data/mock_trades.csv` con estructura preparada para:
 
 - Operaciones individuales (`trade_id`).

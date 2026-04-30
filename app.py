@@ -13,7 +13,14 @@ from options_dashboard.charts import (
     chart_premium_by_month,
     chart_win_loss,
 )
-from options_dashboard.data import DataValidationError, grouped_strategies, load_trades
+from options_dashboard.data import (
+    DataValidationError,
+    grouped_strategies,
+    list_data_csv_files,
+    load_trades,
+    resolve_default_data_file,
+)
+from options_dashboard.ib_flex import download_latest_ib_csv, load_import_summary, merge_latest_into_master
 from options_dashboard.metrics import build_kpis, cumulative_pnl, monthly_pnl
 
 st.set_page_config(page_title="Dashboard de Opciones", layout="wide")
@@ -156,6 +163,48 @@ def expirations_view(df: pd.DataFrame) -> None:
     st.plotly_chart(chart_expiration_calendar(df), use_container_width=True)
 
 
+def import_summary_view() -> None:
+    st.header("Import Summary")
+    summary = load_import_summary()
+    if not summary:
+        st.info("No hay importaciones registradas todavía.")
+        return
+
+    st.subheader("1. Import status")
+    st.write(f"Last import timestamp: **{summary.get('timestamp_utc', 'N/A')}**")
+    st.write(f"Source used: **{summary.get('source_used', 'N/A')}**")
+    st.write(f"File loaded: **{summary.get('file_loaded', 'N/A')}**")
+    st.write(f"Success: **{summary.get('success', False)}**")
+
+    st.subheader("2. Row summary")
+    row_summary = {
+        "Rows downloaded in Consulta_latest.csv": summary.get("rows_downloaded_latest", 0),
+        "Rows with TradeID": summary.get("rows_with_tradeid", 0),
+        "Rows without TradeID dropped": summary.get("rows_without_tradeid_dropped", 0),
+        "Rows already existing in master": summary.get("rows_already_existing_master", 0),
+        "New rows added to master": summary.get("new_rows_added_to_master", 0),
+        "Total rows in Consulta_master.csv": summary.get("total_rows_master", 0),
+        "Unique TradeID count": summary.get("unique_tradeid_count", 0),
+        "Duplicated TradeID count": summary.get("duplicated_tradeid_count", 0),
+    }
+    st.dataframe(pd.DataFrame([row_summary]), use_container_width=True, hide_index=True)
+
+    st.subheader("3. New trades added")
+    new_rows = pd.DataFrame(summary.get("new_trades_added", []))
+    if new_rows.empty:
+        st.info("No se añadieron nuevas operaciones en la última importación.")
+    else:
+        st.dataframe(new_rows, use_container_width=True, hide_index=True)
+
+    st.subheader("4. Warnings")
+    warnings = summary.get("warnings", [])
+    if warnings:
+        for warning in warnings:
+            st.warning(warning)
+    else:
+        st.success("Sin warnings en la última importación.")
+
+
 def main() -> None:
     st.sidebar.title("Seguimiento de opciones")
     mode = st.sidebar.radio("Tema", ["Claro", "Oscuro"])
@@ -163,17 +212,68 @@ def main() -> None:
 
     section = st.sidebar.radio(
         "Navegación",
-        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos"],
+        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "Import Summary"],
     )
 
+    st.sidebar.subheader("Interactive Brokers")
+    ib_token = st.sidebar.text_input("IB Flex Token", type="password")
+    ib_query_id = st.sidebar.text_input("IB Flex Query ID")
+    if st.sidebar.button("Download latest IB data", use_container_width=True):
+        if not ib_token or not ib_query_id:
+            st.sidebar.error("Debes introducir token y query id.")
+        else:
+            try:
+                download_latest_ib_csv(ib_token, ib_query_id)
+                summary = merge_latest_into_master()
+                st.sidebar.success(
+                    f"Importación OK. Nuevas filas: {summary.get('new_rows_added_to_master', 0)}"
+                )
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as exc:
+                st.sidebar.error(f"Error importando datos de IB: {exc}")
+
+    available_files = list_data_csv_files()
+    default_file = resolve_default_data_file()
+    selected_file = str(default_file)
+    if available_files:
+        labels = [p.name for p in available_files]
+        default_idx = labels.index(default_file.name) if default_file.name in labels else 0
+        chosen_label = st.sidebar.selectbox("Archivo CSV", labels, index=default_idx)
+        selected_file = str(next(p for p in available_files if p.name == chosen_label))
+
     try:
-        df = load_trades()
+        df = load_trades(path=selected_file)
     except FileNotFoundError:
-        st.error("No se encontró data/mock_trades.csv. Añade un dataset para continuar.")
+        st.error("No se encontró ningún CSV en la carpeta data.")
         return
     except DataValidationError as err:
         st.error(str(err))
         return
+
+    with st.sidebar.expander("Debug de carga", expanded=False):
+        st.write(f"Archivo: **{df.attrs.get('file_path', selected_file)}**")
+        st.write(f"Fuente detectada: **{df.attrs.get('source', 'desconocida')}**")
+        st.write(f"Filas cargadas: **{df.attrs.get('rows_loaded', len(df))}**")
+        if df.attrs.get("source") == "ib_csv":
+            st.write(f"Filas crudas (raw): **{df.attrs.get('raw_rows_count', 'N/A')}**")
+            st.write(f"Filas filtradas (OPT + TradeID + fecha): **{df.attrs.get('filtered_rows_count', 'N/A')}**")
+            st.write(f"Filas descartadas: **{df.attrs.get('dropped_rows_count', 'N/A')}**")
+        st.write("Columnas detectadas:")
+        st.code(", ".join(df.attrs.get("detected_columns", list(df.columns))))
+        missing_fields = df.attrs.get("missing_fields", [])
+        st.write("Campos faltantes o vacíos:")
+        st.code(", ".join(missing_fields) if missing_fields else "Ninguno")
+        st.write("Primeras 10 filas normalizadas:")
+        st.dataframe(df.head(10), use_container_width=True, hide_index=True)
+        normalized_preview = df.attrs.get("normalized_preview")
+        if normalized_preview is not None and not normalized_preview.empty:
+            st.write("Vista normalizada IB (schema limpio):")
+            st.dataframe(normalized_preview, use_container_width=True, hide_index=True)
+        contract_results = df.attrs.get("contract_results")
+        if contract_results is not None and not contract_results.empty:
+            st.write("Resultado por contrato (contract_key / net_quantity / net_cash_total / position_status):")
+            st.dataframe(contract_results, use_container_width=True, hide_index=True)
 
     if section == "Dashboard":
         dashboard_view(df)
@@ -181,8 +281,10 @@ def main() -> None:
         operations_table_view(df)
     elif section == "Vista por ticker":
         ticker_view(df)
-    else:
+    elif section == "Vencimientos":
         expirations_view(df)
+    else:
+        import_summary_view()
 
 
 if __name__ == "__main__":

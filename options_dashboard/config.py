@@ -2,7 +2,11 @@
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
 DATA_FILE = BASE_DIR / "data" / "mock_trades.csv"
+MASTER_DATA_FILE = DATA_DIR / "Consulta_master.csv"
+LATEST_DATA_FILE = DATA_DIR / "Consulta_latest.csv"
+IMPORT_SUMMARY_FILE = DATA_DIR / "import_summary.json"
 DATE_COLUMNS = ["open_date", "close_date", "expiration"]
 REQUIRED_COLUMNS = {
     "trade_id",
