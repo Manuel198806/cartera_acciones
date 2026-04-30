@@ -30,6 +30,7 @@ from options_dashboard.ib_flex import (
 )
 from options_dashboard.metrics import build_kpis, cumulative_pnl, monthly_pnl
 from options_dashboard.ib_options_api import (
+    LOG_PATH as OPTIONS_BUILDER_LOG_PATH,
     connect_ib,
     disconnect_ib,
     get_filtered_option_chain,
@@ -421,7 +422,7 @@ def options_strategy_builder_view() -> None:
         underlying = get_underlying_contract(ticker)
         metadata = get_option_chain_metadata(ticker)
     except Exception as exc:
-        st.warning(f"IB no disponible o error obteniendo metadatos: {exc}")
+        st.warning(f"IB no disponible o error obteniendo metadatos. Revisa log: {OPTIONS_BUILDER_LOG_PATH}")
         return
 
     st.write(f"**Underlying price:** {underlying.get('market_price') or 'N/A'}")
@@ -435,7 +436,7 @@ def options_strategy_builder_view() -> None:
             cached = get_cached_chain(ticker, expiry, max_age_minutes=1440)
             st.success("Cadena actualizada y guardada en SQLite cache.")
         except Exception as exc:
-            st.error(f"No se pudo actualizar cadena: {exc}")
+            st.warning(f"No se pudo actualizar cadena desde IB. Revisa log: {OPTIONS_BUILDER_LOG_PATH}")
             return
 
     strategy = st.selectbox("Strategy", ["Cash-Secured Put"])
