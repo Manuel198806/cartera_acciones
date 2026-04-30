@@ -44,6 +44,7 @@ def _ensure_ib_available() -> None:
 
 def connect_ib(host: str = "127.0.0.1", port: int = 7496, client_id: int = 10) -> IB:
     """Connect to IB Gateway/TWS in read-only usage mode."""
+    ensure_event_loop()
     global _ib
     _ensure_ib_available()
     if _ib is not None and _ib.isConnected():
@@ -58,6 +59,7 @@ def connect_ib(host: str = "127.0.0.1", port: int = 7496, client_id: int = 10) -
 
 
 def disconnect_ib() -> None:
+    ensure_event_loop()
     global _ib
     if _ib is not None and _ib.isConnected():
         _ib.disconnect()
@@ -65,6 +67,7 @@ def disconnect_ib() -> None:
 
 
 def get_underlying_contract(ticker: str) -> dict[str, Any]:
+    ensure_event_loop()
     ib = connect_ib()
     contract = Stock(ticker.upper().strip(), "SMART", "USD")
     qualified = ib.qualifyContracts(contract)
@@ -83,6 +86,7 @@ def get_underlying_contract(ticker: str) -> dict[str, Any]:
 
 
 def get_option_chain_metadata(ticker: str) -> dict[str, Any]:
+    ensure_event_loop()
     ib = connect_ib()
     under = Stock(ticker.upper().strip(), "SMART", "USD")
     under = ib.qualifyContracts(under)[0]
@@ -114,6 +118,7 @@ def _safe_number(value: Any) -> float | None:
 
 
 def get_option_quotes_for_contracts(contracts: list[Any]) -> pd.DataFrame:
+    ensure_event_loop()
     ib = connect_ib()
     if not contracts:
         return pd.DataFrame()
@@ -157,6 +162,7 @@ def get_filtered_option_chain(
     underlying_price: float | None = None,
     strike_range_pct: float = 0.20,
 ) -> pd.DataFrame:
+    ensure_event_loop()
     metadata = get_option_chain_metadata(ticker)
     if underlying_price is None:
         underlying_price = get_underlying_contract(ticker).get("market_price")
@@ -183,6 +189,7 @@ def get_filtered_option_chain(
 
 
 def get_open_option_positions() -> pd.DataFrame:
+    ensure_event_loop()
     ib = connect_ib()
     positions = ib.positions()
     rows = []
