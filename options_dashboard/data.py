@@ -74,11 +74,11 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     df = _clean_str(df)
 
-    # Mantener solo opciones con TradeID válido
+    # Mantener OPT y STK con TradeID válido (Wheel requiere ambas)
     for col in ["TradeID", "Open/CloseIndicator", "OrigTradeID", "AssetClass", "Description"]:
         if col not in df.columns:
             df[col] = pd.NA
-    df = df[df["AssetClass"].fillna("").str.upper() == "OPT"].copy()
+    df = df[df["AssetClass"].fillna("").str.upper().isin(["OPT", "STK"])].copy()
     trade_id_raw = df["TradeID"].fillna("").astype(str).str.strip()
     df = df[trade_id_raw.ne("")].copy()
     df = df[df["TradeDate"].notna()].copy()
@@ -95,6 +95,7 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
     strike = _extract_strike_from_description(df.get("Description", pd.Series(index=df.index, dtype="object")))
     net_cash = pd.to_numeric(df.get("NetCash"), errors="coerce").fillna(0.0)
     leg_type_mapped = df["Put/Call"].fillna("").str.upper().map({"C": "CALL", "P": "PUT"}).fillna("UNKNOWN")
+    leg_type_mapped = leg_type_mapped.where(df["AssetClass"].fillna("").str.upper() != "STK", "STOCK")
     open_close = df["Open/CloseIndicator"].fillna("").str.upper().map({"O": "OPENING", "C": "CLOSING"}).fillna("UNKNOWN")
 
     df["quantity"] = qty
@@ -106,7 +107,7 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
     df["open_close_indicator"] = open_close
     df["ticker"] = df.get("UnderlyingSymbol", pd.Series(index=df.index, dtype="object")).fillna("UNKNOWN")
     df["description"] = df.get("Description", pd.Series(index=df.index, dtype="object")).fillna("")
-    df["asset"] = "OPTION"
+    df["asset"] = df["AssetClass"].fillna("").str.upper().map({"OPT": "OPTION", "STK": "STOCK"}).fillna("UNKNOWN")
 
     # TradeID puede venir vacío o en notación científica
     raw_trade_id = df["TradeID"].fillna("").astype(str)
@@ -173,13 +174,22 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
     normalized["strategy_id"] = normalized["contract_key"]
     normalized["underlying_price"] = 0.0
     normalized["strategy_type"] = "Contrato opción (IB)"
+    normalized.loc[normalized["asset"] == "STOCK", "strategy_type"] = "Operación stock (IB)"
     normalized["close_date"] = pd.NaT
-    normalized["premium"] = normalized["net_cash"].abs()
+    normalized["premium"] = normalized["net_cash"].abs().where(normalized["asset"] == "OPTION", 0.0)
     normalized["commission"] = 0.0
     normalized["realized_pnl"] = normalized["net_cash"]
     normalized["unrealized_pnl"] = 0.0
     normalized["status"] = "abierta"
     normalized["notes"] = normalized["description"]
+    normalized["signed_quantity"] = normalized.apply(
+        lambda row: row["quantity_abs"] if str(row["action"]).upper() == "BUY" else -row["quantity_abs"], axis=1
+    )
+    normalized["execution_price"] = (normalized["net_cash"].abs() / normalized["quantity_abs"]).where(
+        normalized["quantity_abs"] > 0, 0.0
+    )
+    normalized["net_cash_effect"] = normalized["net_cash"]
+    normalized["open_close_indicator"] = normalized["open_close_indicator"].fillna("UNKNOWN")
     normalized["quantity"] = normalized["quantity_abs"]
     normalized = normalized.merge(
         contract_results[["contract_key", "position_status", "realized_pnl", "pending_cash"]],
@@ -210,6 +220,10 @@ def normalize_ib_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
             "unrealized_pnl",
             "status",
             "notes",
+            "open_close_indicator",
+            "signed_quantity",
+            "execution_price",
+            "net_cash_effect",
         ]
     ].copy().reset_index(drop=True)
 
@@ -258,6 +272,22 @@ def load_trades(path: str | None = None) -> pd.DataFrame:
     ]
     for col in numeric_columns:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    if "open_close_indicator" not in df.columns:
+        df["open_close_indicator"] = "UNKNOWN"
+    if "signed_quantity" not in df.columns:
+        signed = df["quantity"].copy()
+        if "action" in df.columns:
+            signed = signed.where(df["action"].astype(str).str.upper() == "BUY", -signed)
+        df["signed_quantity"] = signed
+    if "execution_price" not in df.columns:
+        qty = df["quantity"].replace(0, pd.NA)
+        df["execution_price"] = (df["premium"] / qty).fillna(0.0)
+    if "net_cash_effect" not in df.columns:
+        if "realized_pnl" in df.columns:
+            df["net_cash_effect"] = df["realized_pnl"]
+        else:
+            df["net_cash_effect"] = 0.0
 
     df.attrs["detected_columns"] = list(df.columns)
     missing_after = [col for col in REQUIRED_COLUMNS if col not in df.columns or df[col].isna().all()]

@@ -29,6 +29,13 @@ from options_dashboard.ib_flex import (
     merge_uploaded_csv_into_master,
 )
 from options_dashboard.metrics import build_kpis, cumulative_pnl, monthly_pnl
+from options_dashboard.wheel import (
+    build_wheel_operations_table,
+    build_wheel_summary,
+    calculate_wheel_metrics,
+    get_wheel_operations_for_ticker,
+    load_wheel_data,
+)
 
 st.set_page_config(page_title="Dashboard de Opciones", layout="wide")
 
@@ -395,6 +402,40 @@ def position_chart_view(df: pd.DataFrame) -> None:
     )
 
 
+def wheel_view(df: pd.DataFrame) -> None:
+    st.header("Wheel")
+    wheel_df = load_wheel_data(df)
+    ticker = st.selectbox("Selecciona ticker subyacente", sorted(wheel_df["ticker"].dropna().unique()))
+    ops = get_wheel_operations_for_ticker(wheel_df, ticker)
+    metrics = calculate_wheel_metrics(ops)
+
+    cards1 = st.columns(4)
+    cards2 = st.columns(3)
+    cards1[0].metric("Net premiums", format_currency(float(metrics["net_premiums"])))
+    cards1[1].metric("Break-even", f"{metrics['break_even']:.2f}" if metrics["break_even"] is not None else "N/A")
+    cards1[2].metric("Shares held", f"{metrics['shares_held']:.0f}")
+    cards1[3].metric(
+        "Adjusted stock cost basis",
+        f"{metrics['net_stock_cost_basis']:.2f}" if metrics["net_stock_cost_basis"] is not None else "N/A",
+    )
+    cards2[0].metric(
+        "Active put strike",
+        f"{metrics['active_short_put_strike']:.2f}" if metrics["active_short_put_strike"] is not None else "N/A",
+    )
+    cards2[1].metric(
+        "Active call strike",
+        f"{metrics['active_covered_call_strike']:.2f}" if metrics["active_covered_call_strike"] is not None else "N/A",
+    )
+    cards2[2].metric("Wheel status", str(metrics["wheel_status"]))
+
+    st.subheader("Operations timeline")
+    timeline = build_wheel_operations_table(ops)
+    st.dataframe(timeline, use_container_width=True, hide_index=True)
+
+    st.subheader("Strategy summary")
+    st.info(build_wheel_summary(ticker, metrics))
+
+
 def main() -> None:
     st.sidebar.title("Seguimiento de opciones")
     mode = st.sidebar.radio("Tema", ["Claro", "Oscuro"])
@@ -402,7 +443,7 @@ def main() -> None:
 
     section = st.sidebar.radio(
         "Navegación",
-        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "Position Chart", "Import Summary", "Upload CSV to Master"],
+        ["Dashboard", "Operaciones", "Vista por ticker", "Wheel", "Vencimientos", "Position Chart", "Import Summary", "Upload CSV to Master"],
     )
 
     st.sidebar.subheader("Interactive Brokers")
@@ -475,6 +516,8 @@ def main() -> None:
         expirations_view(df)
     elif section == "Position Chart":
         position_chart_view(df)
+    elif section == "Wheel":
+        wheel_view(df)
     elif section == "Upload CSV to Master":
         upload_csv_to_master_view()
     else:
