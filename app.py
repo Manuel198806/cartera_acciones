@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -28,7 +29,14 @@ from options_dashboard.ib_flex import (
     merge_latest_into_master,
     merge_uploaded_csv_into_master,
 )
-from options_dashboard.metrics import build_kpis, cumulative_pnl, monthly_pnl
+from options_dashboard.metrics import (
+    build_kpis,
+    cumulative_pnl,
+    daily_realized_pnl,
+    monthly_pnl,
+    monthly_pnl_summary,
+    weekly_pnl_summary,
+)
 
 st.set_page_config(page_title="Dashboard de Opciones", layout="wide")
 
@@ -395,6 +403,149 @@ def position_chart_view(df: pd.DataFrame) -> None:
     )
 
 
+def _currency_class(value: float) -> str:
+    if value > 0:
+        return "pnl-positive"
+    if value < 0:
+        return "pnl-negative"
+    return "pnl-neutral"
+
+
+def calendar_view(df: pd.DataFrame) -> None:
+    st.header("Calendario")
+    st.caption("Suposición: el P&L diario se calcula con operaciones cerradas usando `open_date`, siguiendo la lógica actual de KPIs.")
+
+    st.markdown(
+        """
+        <style>
+        .calendar-grid {display:grid;grid-template-columns:repeat(7,minmax(110px,1fr));gap:10px;margin-top:6px;}
+        .calendar-head {font-size:0.8rem;font-weight:700;opacity:.75;text-align:center;padding:4px 0;}
+        .day-card {border-radius:12px;padding:10px;border:1px solid rgba(128,128,128,.25);min-height:105px;}
+        .pnl-positive {background:rgba(34,197,94,.18);} .pnl-negative {background:rgba(239,68,68,.18);} .pnl-neutral {background:rgba(148,163,184,.14);}
+        .day-num {font-weight:700;font-size:.95rem;margin-bottom:2px;} .day-pnl {font-size:.95rem;font-weight:700;} .day-trades {font-size:.8rem;opacity:.85;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    today = pd.Timestamp.utcnow().tz_localize(None)
+    years = list(range(max(today.year - 5, int(df["open_date"].dt.year.min()) if not df.empty else today.year), today.year + 3))
+    month_names = [calendar.month_name[i] for i in range(1, 13)]
+
+    nav1, nav2, nav3, nav4, nav5 = st.columns([1, 1, 2, 1, 1])
+    selected_year = nav3.selectbox("Año", years, index=years.index(today.year) if today.year in years else len(years) - 1)
+    selected_month_name = nav4.selectbox("Mes", month_names, index=today.month - 1)
+    selected_month = month_names.index(selected_month_name) + 1
+
+    prev_btn = nav1.button("◀ Mes anterior")
+    next_btn = nav2.button("Mes siguiente ▶")
+
+    if prev_btn:
+        if selected_month == 1:
+            selected_month = 12
+            selected_year -= 1
+        else:
+            selected_month -= 1
+    if next_btn:
+        if selected_month == 12:
+            selected_month = 1
+            selected_year += 1
+        else:
+            selected_month += 1
+
+    st.subheader(f"{calendar.month_name[selected_month]} {selected_year}")
+
+    daily = daily_realized_pnl(df)
+    month_start = pd.Timestamp(year=selected_year, month=selected_month, day=1)
+    month_end = month_start + pd.offsets.MonthEnd(1)
+    month_days = pd.date_range(month_start, month_end, freq="D")
+
+    month_daily = pd.DataFrame({"date": month_days}).merge(daily, on="date", how="left")
+    month_daily[["daily_pnl", "trades", "winning_trades", "losing_trades"]] = month_daily[
+        ["daily_pnl", "trades", "winning_trades", "losing_trades"]
+    ].fillna(0)
+
+    headers = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+    st.markdown('<div class="calendar-grid">' + "".join([f'<div class="calendar-head">{d}</div>' for d in headers]) + "</div>", unsafe_allow_html=True)
+
+    first_weekday = month_start.weekday()
+    cards = ["<div></div>"] * first_weekday
+    for _, row in month_daily.iterrows():
+        cls = _currency_class(float(row["daily_pnl"]))
+        cards.append(
+            f'<div class="day-card {cls}"><div class="day-num">{row["date"].day:02d}</div>'
+            f'<div class="day-pnl">{format_currency(float(row["daily_pnl"]))}</div>'
+            f'<div class="day-trades">{int(row["trades"])} trades</div></div>'
+        )
+    st.markdown(f'<div class="calendar-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+    selectable_days = month_daily["date"].dt.strftime("%Y-%m-%d").tolist()
+    selected_day = st.selectbox("Detalle diario", selectable_days, index=min(today.day - 1, len(selectable_days) - 1))
+    selected_ts = pd.to_datetime(selected_day)
+    day_trades = df[(df["status"].isin({"cerrada", "expirada", "asignada"})) & (df["open_date"].dt.normalize() == selected_ts)]
+
+    st.subheader(f"Operaciones del {selected_ts.date()}")
+    if day_trades.empty:
+        st.info("No hubo operaciones cerradas este día.")
+    else:
+        details = day_trades[["ticker", "strategy_type", "realized_pnl", "premium", "notes"]].copy()
+        details = details.rename(columns={"strategy_type": "estrategia", "realized_pnl": "P&L", "premium": "primas", "notes": "notas"})
+        st.dataframe(details.sort_values("P&L", ascending=False), use_container_width=True, hide_index=True)
+
+    st.subheader("Resumen semanal (mes visible)")
+    month_daily_nonzero = month_daily[month_daily["trades"] > 0].copy()
+    if month_daily_nonzero.empty:
+        st.info("Sin actividad para resumir en este mes.")
+    else:
+        iso = month_daily_nonzero["date"].dt.isocalendar()
+        month_daily_nonzero["week"] = iso.week
+        weekly_view = (
+            month_daily_nonzero.groupby("week", as_index=False)
+            .agg(
+                pnl_semanal=("daily_pnl", "sum"),
+                trades=("trades", "sum"),
+                dias_ganadores=("daily_pnl", lambda s: int((s > 0).sum())),
+                dias_perdedores=("daily_pnl", lambda s: int((s < 0).sum())),
+            )
+            .sort_values("week")
+        )
+        st.dataframe(weekly_view, use_container_width=True, hide_index=True)
+
+    monthly_total = float(month_daily["daily_pnl"].sum())
+    month_trades = int(month_daily["trades"].sum())
+    operated = month_daily[month_daily["trades"] > 0]
+    avg_daily = float(operated["daily_pnl"].mean()) if not operated.empty else 0.0
+    best_day = operated.loc[operated["daily_pnl"].idxmax()] if not operated.empty else None
+    worst_day = operated.loc[operated["daily_pnl"].idxmin()] if not operated.empty else None
+    winner_ratio = ((operated["daily_pnl"] > 0).sum() / len(operated) * 100) if not operated.empty else 0.0
+
+    st.subheader("Resumen mensual")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("P&L mensual", format_currency(monthly_total))
+    m2.metric("Trades totales", month_trades)
+    m3.metric("Promedio diario", format_currency(avg_daily))
+    m4.metric("Días operados", int(len(operated)))
+    m5, m6, m7 = st.columns(3)
+    m5.metric("Mejor día", "N/A" if best_day is None else f"{best_day['date'].date()} · {format_currency(float(best_day['daily_pnl']))}")
+    m6.metric("Peor día", "N/A" if worst_day is None else f"{worst_day['date'].date()} · {format_currency(float(worst_day['daily_pnl']))}")
+    m7.metric("% días ganadores", f"{winner_ratio:.1f}%")
+
+    st.subheader("Vista semanal (histórico)")
+    st.dataframe(weekly_pnl_summary(df), use_container_width=True, hide_index=True)
+
+    st.subheader("Vista mensual histórica")
+    monthly_hist = monthly_pnl_summary(df)
+    if not monthly_hist.empty:
+        monthly_hist["mes"] = monthly_hist.apply(lambda r: f"{int(r['year'])}-{int(r['month']):02d}", axis=1)
+        st.dataframe(
+            monthly_hist[["year", "month", "monthly_pnl", "trades", "operated_days"]].sort_values(["year", "month"], ascending=[False, False]),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No hay histórico mensual disponible todavía.")
+
+
 def main() -> None:
     st.sidebar.title("Seguimiento de opciones")
     mode = st.sidebar.radio("Tema", ["Claro", "Oscuro"])
@@ -402,7 +553,7 @@ def main() -> None:
 
     section = st.sidebar.radio(
         "Navegación",
-        ["Dashboard", "Operaciones", "Vista por ticker", "Vencimientos", "Position Chart", "Import Summary", "Upload CSV to Master"],
+        ["Dashboard", "Calendario", "Operaciones", "Vista por ticker", "Vencimientos", "Position Chart", "Import Summary", "Upload CSV to Master"],
     )
 
     st.sidebar.subheader("Interactive Brokers")
@@ -467,6 +618,8 @@ def main() -> None:
 
     if section == "Dashboard":
         dashboard_view(df)
+    elif section == "Calendario":
+        calendar_view(df)
     elif section == "Operaciones":
         operations_table_view(df)
     elif section == "Vista por ticker":
